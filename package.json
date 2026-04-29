@@ -1,0 +1,18 @@
+{
+  "name": "paraverse-module-translator",
+  "version": "0.1.0",
+  "description": "Scrape current-term Paraverse modules and translate text while preserving layout",
+  "main": "src/index.js",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node src/index.js",
+    "login": "node src/index.js --login-only"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.5",
+    "node-fetch": "^2.7.0",
+    "pdfjs-dist": "^3.11.174",
+    "playwright": "^1.53.0",
+    "pptxgenjs": "^3.12.0"
+  }
+}
