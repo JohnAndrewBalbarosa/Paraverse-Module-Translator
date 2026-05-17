@@ -22,3 +22,7 @@ yarn-error.log*
 Thumbs.db
 .vscode/
 .idea/
+recordings/
+
+# Developer-only Playwright loggers (not for production)
+scripts/dev-*.js

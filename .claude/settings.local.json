@@ -1,0 +1,22 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(powershell -Command \"Get-Content 'C:\\\\Users\\\\Drew\\\\AppData\\\\Local\\\\Temp\\\\claude\\\\C--Users-Drew-Desktop-Paraverse-Module-Translator\\\\7780a213-de2d-4596-bfcf-5dc18a3f4f41\\\\tasks\\\\bnu3b053b.output' -Wait -Tail 100\")",
+      "Bash(powershell -Command \"Get-Content 'C:\\\\Users\\\\Drew\\\\AppData\\\\Local\\\\Temp\\\\claude\\\\C--Users-Drew-Desktop-Paraverse-Module-Translator\\\\7780a213-de2d-4596-bfcf-5dc18a3f4f41\\\\tasks\\\\b1fvxabp5.output' -Wait -Tail 100\")",
+      "Bash(powershell -Command \"Get-Content 'C:\\\\Users\\\\Drew\\\\AppData\\\\Local\\\\Temp\\\\claude\\\\C--Users-Drew-Desktop-Paraverse-Module-Translator\\\\7780a213-de2d-4596-bfcf-5dc18a3f4f41\\\\tasks\\\\bzgbpku5m.output' -Wait -Tail 100\")",
+      "Bash(powershell -Command \"Get-Content 'C:\\\\Users\\\\Drew\\\\AppData\\\\Local\\\\Temp\\\\claude\\\\C--Users-Drew-Desktop-Paraverse-Module-Translator\\\\7780a213-de2d-4596-bfcf-5dc18a3f4f41\\\\tasks\\\\bwbb20z26.output' -Wait -Tail 100\")",
+      "Bash(powershell -Command \"Get-Content 'C:\\\\Users\\\\Drew\\\\AppData\\\\Local\\\\Temp\\\\claude\\\\C--Users-Drew-Desktop-Paraverse-Module-Translator\\\\7780a213-de2d-4596-bfcf-5dc18a3f4f41\\\\tasks\\\\bwgz76oww.output' -Wait -Tail 100\")",
+      "Bash(powershell -Command \"Get-Content 'C:\\\\Users\\\\Drew\\\\AppData\\\\Local\\\\Temp\\\\claude\\\\C--Users-Drew-Desktop-Paraverse-Module-Translator\\\\7780a213-de2d-4596-bfcf-5dc18a3f4f41\\\\tasks\\\\bdv4el014.output' -Wait -Tail 100\")",
+      "Bash(powershell -Command \"Get-Content 'C:\\\\Users\\\\Drew\\\\AppData\\\\Local\\\\Temp\\\\claude\\\\C--Users-Drew-Desktop-Paraverse-Module-Translator\\\\7780a213-de2d-4596-bfcf-5dc18a3f4f41\\\\tasks\\\\bb3y4e5ky.output' -Wait -Tail 100\")",
+      "Bash(powershell -Command \"Get-Content 'C:\\\\Users\\\\Drew\\\\AppData\\\\Local\\\\Temp\\\\claude\\\\C--Users-Drew-Desktop-Paraverse-Module-Translator\\\\7780a213-de2d-4596-bfcf-5dc18a3f4f41\\\\tasks\\\\braqd2k31.output' -Wait -Tail 100\")",
+      "Bash(powershell -Command \"Get-Content 'C:\\\\Users\\\\Drew\\\\AppData\\\\Local\\\\Temp\\\\claude\\\\C--Users-Drew-Desktop-Paraverse-Module-Translator\\\\7780a213-de2d-4596-bfcf-5dc18a3f4f41\\\\tasks\\\\braqd2k31.output' -Wait -Tail 10 | Select-String 'Done\\\\.|========'\")",
+      "Bash(powershell -Command \"Get-Content 'C:\\\\Users\\\\Drew\\\\AppData\\\\Local\\\\Temp\\\\claude\\\\C--Users-Drew-Desktop-Paraverse-Module-Translator\\\\7780a213-de2d-4596-bfcf-5dc18a3f4f41\\\\tasks\\\\b0dyy1ceu.output' -Wait -Tail 100\")",
+      "Bash(powershell -Command \"Get-Content 'C:\\\\Users\\\\Drew\\\\AppData\\\\Local\\\\Temp\\\\claude\\\\C--Users-Drew-Desktop-Paraverse-Module-Translator\\\\7780a213-de2d-4596-bfcf-5dc18a3f4f41\\\\tasks\\\\b0dyy1ceu.output' -Wait -Tail 5 | Select-String '======|Done\\\\.'\")",
+      "Bash(powershell -Command \"Get-Content 'C:\\\\Users\\\\Drew\\\\AppData\\\\Local\\\\Temp\\\\claude\\\\C--Users-Drew-Desktop-Paraverse-Module-Translator\\\\7780a213-de2d-4596-bfcf-5dc18a3f4f41\\\\tasks\\\\b5pv2ohrm.output' -Wait -Tail 100\")",
+      "Bash(powershell -Command \"Get-Content 'C:\\\\Users\\\\Drew\\\\AppData\\\\Local\\\\Temp\\\\claude\\\\C--Users-Drew-Desktop-Paraverse-Module-Translator\\\\7780a213-de2d-4596-bfcf-5dc18a3f4f41\\\\tasks\\\\b5pv2ohrm.output' -Wait -Tail 5 | Select-String '======|Done\\\\.'\")",
+      "Bash(powershell -Command \"Get-Content 'C:\\\\Users\\\\Drew\\\\AppData\\\\Local\\\\Temp\\\\claude\\\\C--Users-Drew-Desktop-Paraverse-Module-Translator\\\\7780a213-de2d-4596-bfcf-5dc18a3f4f41\\\\tasks\\\\b5pv2ohrm.output' -Wait -Tail 3 | Select-String 'Output folder'\")",
+      "Bash(powershell -Command \"Get-Content 'C:\\\\Users\\\\Drew\\\\AppData\\\\Local\\\\Temp\\\\claude\\\\C--Users-Drew-Desktop-Paraverse-Module-Translator\\\\7780a213-de2d-4596-bfcf-5dc18a3f4f41\\\\tasks\\\\b5pv2ohrm.output' -Wait -Tail 5 | Select-String 'Output folder|Done\\\\.'\")",
+      "PowerShell(Get-ChildItem -Recurse \"C:\\\\Users\\\\Drew\\\\Desktop\\\\Paraverse Module Translator\\\\output\" | Where-Object { !$_.PSIsContainer } | Select-Object FullName, Length)"
+    ]
+  }
+}

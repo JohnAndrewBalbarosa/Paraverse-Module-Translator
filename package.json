@@ -6,7 +6,13 @@
   "type": "commonjs",
   "scripts": {
     "start": "node src/index.js",
-    "login": "node src/index.js --login-only"
+    "login": "node src/index.js --login-only",
+    "record": "node scripts/patch-recorder-ui.js && node scripts/record.js",
+    "record:nopatch": "node scripts/record.js",
+    "trace": "playwright show-trace",
+    "download": "node scripts/download-module.js",
+    "postinstall": "node scripts/patch-recorder-ui.js",
+    "record:fresh": "playwright codegen --target=javascript -o recorded.js https://paraverse.feutech.edu.ph"
   },
   "dependencies": {
     "dotenv": "^16.4.5",
