@@ -14,6 +14,7 @@ const fs = require("fs");
 const path = require("path");
 const readline = require("node:readline/promises");
 const { stdin, stdout, stderr } = require("node:process");
+const { URL } = require("node:url");
 const { chromium } = require("playwright");
 
 require("dotenv").config();
@@ -24,6 +25,12 @@ const COOKIES_PATH = path.resolve(process.cwd(), "cookies.json");
 const PROFILE_DIR = path.resolve(process.cwd(), "sessions", "profile");
 const MFA_WAIT_MS = 5 * 60 * 1000;
 const STEP_TIMEOUT_MS = 30 * 1000;
+
+// Must match src/httpClient.js DEFAULT_USER_AGENT so Incapsula's WAF doesn't
+// invalidate the session when cookies move from Playwright to node-fetch.
+const REAL_CHROME_UA =
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
+  "(KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36";
 
 const CHAR_CTRL_C = String.fromCharCode(3);
 const CHAR_BACKSPACE = String.fromCharCode(127);
@@ -133,7 +140,12 @@ async function safeText(locator) {
 }
 
 async function isOnParaverse(page) {
-  return /paraverse\.feutech\.edu\.ph/.test(page.url());
+  try {
+    const { hostname } = new URL(page.url());
+    return hostname === "paraverse.feutech.edu.ph";
+  } catch {
+    return false;
+  }
 }
 
 async function tryClickAccountTile(page, username) {
@@ -238,17 +250,25 @@ async function main() {
 
   const context = await chromium.launchPersistentContext(PROFILE_DIR, {
     headless: true,
-    viewport: { width: 1366, height: 900 }
+    viewport: { width: 1366, height: 900 },
+    userAgent: REAL_CHROME_UA
   });
   const page = await context.newPage();
 
   try {
     await page.goto(PARAVERSE_URL, { waitUntil: "domcontentloaded", timeout: STEP_TIMEOUT_MS });
+    // Let the SSO redirect chain settle. waitUntil:"domcontentloaded" returns
+    // on the first DOM event, which can be the MS login page mid-redirect.
+    try {
+      await page.waitForLoadState("networkidle", { timeout: 15000 });
+    } catch {
+      // ignore — some MS pages keep network busy
+    }
 
     if (await isOnParaverse(page)) {
-      log("Session still valid — no Microsoft prompt needed.");
+      log("Silent SSO succeeded — no credentials needed.");
     } else {
-      log("Redirected to Microsoft sign-in.");
+      log("Microsoft sign-in required.");
       const pickedExisting = await tryClickAccountTile(page, username);
       if (!pickedExisting) {
         await submitEmail(page, username);
@@ -260,8 +280,45 @@ async function main() {
     await page.waitForURL(/paraverse\.feutech\.edu\.ph/, { timeout: 60000 });
     await page.waitForLoadState("domcontentloaded");
 
+    // Verify auth actually works before saving. If Paraverse re-redirects to
+    // MS here, our cookies will be stale-on-arrival to node-fetch.
+    const verifyResp = await context.request.get(PARAVERSE_URL, { timeout: 20000 });
+    const finalUrl = verifyResp.url();
+    if (/login\.microsoftonline\.com/.test(finalUrl)) {
+      throw new Error(
+        `Auth verification failed — Paraverse keeps redirecting to Microsoft.\n` +
+        `        This usually means silent SSO failed and you need to sign in with real credentials.\n` +
+        `        Make sure PARAVERSE_USERNAME/PARAVERSE_PASSWORD in .env are correct, or remove them\n` +
+        `        and re-run npm run login to be prompted interactively.\n` +
+        `        Final URL was: ${finalUrl}`
+      );
+    }
+    log(`Auth verified via Playwright (${verifyResp.status()} on ${finalUrl}).`);
+
     const count = await harvestCookies(context);
     log(`Saved ${count} cookie(s) to ${COOKIES_PATH}`);
+
+    // Final smoke test: confirm the cookies + UA actually work over plain
+    // node-fetch (this is what npm start uses). If this fails, the user-agent
+    // or sec-fetch headers in src/httpClient.js don't match what Incapsula expects.
+    try {
+      const { createHttpClient, SessionExpiredError } = require("../src/httpClient");
+      const http = createHttpClient();
+      const html = await http.fetchHtml(PARAVERSE_URL);
+      log(`Smoke test via node-fetch OK — ${html.length} bytes.`);
+    } catch (err) {
+      if (err && err.code === "SESSION_EXPIRED") {
+        stderr.write(
+          `\n[login] WARN: Cookies saved but node-fetch smoke test was redirected to MS.\n` +
+          `         This means Incapsula sees node-fetch as a different client than the\n` +
+          `         browser. Likely cause: User-Agent or Sec-Fetch-* header mismatch.\n` +
+          `         The cookies file IS saved — try \`npm run check-session\` directly.\n`
+        );
+      } else {
+        stderr.write(`\n[login] WARN: smoke test errored: ${err.message}\n`);
+      }
+    }
+
     log("Done. Next run: npm start (zero browser).");
   } finally {
     await page.close().catch(() => {});
