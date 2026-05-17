@@ -134,8 +134,18 @@ function extractCourseModules(html, options = {}) {
 
 function extractModuleAssetUrls(html) {
   const $ = cheerio.load(html);
+  // core-fetch-modules.php returns the WHOLE course's modules in one HTML blob.
+  // The currently-requested module is the only one rendered open — its
+  // accordion body has class `.module-body.collapse.show`. Other modules are
+  // present as `.module-body.collapse` (without `.show`). If we don't scope to
+  // the open one, every module ends up pointing to module 1's PDF.
+  let scope = $(".module-body.collapse.show");
+  if (!scope.length) {
+    // Fallback: try `.show` alone, then the whole document as a last resort.
+    scope = $(".collapse.show").length ? $(".collapse.show") : $.root();
+  }
   const urls = new Set();
-  $("[endpoint-url]").each((_, el) => {
+  scope.find("[endpoint-url]").each((_, el) => {
     const v = ($(el).attr("endpoint-url") || "").trim();
     if (v) urls.add(v);
   });
