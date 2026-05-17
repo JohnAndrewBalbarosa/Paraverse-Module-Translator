@@ -86,7 +86,11 @@ async function scrapeModulesForCourses(http, courses, options = {}) {
     for (const module of moduleLinks) {
       try {
         const fetchUrl = buildModuleFetchUrl(module.courseId, module.moduleId, "active");
-        const moduleHtml = await http.fetchHtml(fetchUrl);
+        // This endpoint is loaded by jQuery's $.load() in the browser, so the
+        // server requires the AJAX-shaped header set (X-Requested-With, cors
+        // Sec-Fetch-*, Referer pointing at the course page). Without these
+        // it returns 403 Forbidden even with valid cookies.
+        const moduleHtml = await http.fetchHtml(fetchUrl, { ajax: true, referer: courseUrl });
         const assetUrls = extractModuleAssetUrls(moduleHtml).map((u) => {
           try {
             return new URL(u, PARAVERSE_ORIGIN).href;

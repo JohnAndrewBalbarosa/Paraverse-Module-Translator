@@ -47,9 +47,27 @@ function createHttpClient(options = {}) {
   const cookies = options.cookies || loadCookies(cookiesPath);
   const extraHeaders = options.extraHeaders || {};
 
-  function buildHeaders(url, perCallHeaders = {}) {
+  function buildAjaxHeaders(url, referer) {
+    return {
+      "User-Agent": DEFAULT_USER_AGENT,
+      Accept: "*/*",
+      "Accept-Language": "en-US,en;q=0.9",
+      "Accept-Encoding": "gzip, deflate, br",
+      "X-Requested-With": "XMLHttpRequest",
+      "sec-ch-ua": '"Chromium";v="147", "Not?A_Brand";v="24"',
+      "sec-ch-ua-mobile": "?0",
+      "sec-ch-ua-platform": '"Windows"',
+      "Sec-Fetch-Dest": "empty",
+      "Sec-Fetch-Mode": "cors",
+      "Sec-Fetch-Site": "same-origin",
+      ...(referer ? { Referer: referer } : {})
+    };
+  }
+
+  function buildHeaders(url, perCallHeaders = {}, init = {}) {
     const cookieHeader = toCookieHeader(cookies, url);
-    const headers = { ...DEFAULT_HEADERS, ...extraHeaders, ...perCallHeaders };
+    const base = init.ajax ? buildAjaxHeaders(url, init.referer) : DEFAULT_HEADERS;
+    const headers = { ...base, ...extraHeaders, ...perCallHeaders };
     if (cookieHeader) {
       headers.Cookie = cookieHeader;
     }
@@ -57,7 +75,7 @@ function createHttpClient(options = {}) {
   }
 
   async function rawFetch(url, init = {}) {
-    const headers = buildHeaders(url, init.headers || {});
+    const headers = buildHeaders(url, init.headers || {}, init);
     const response = await fetch(url, {
       method: init.method || "GET",
       headers,
