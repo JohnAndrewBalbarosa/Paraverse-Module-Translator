@@ -165,30 +165,122 @@ async function extractPagesAsJson(pdfBuffer) {
   return { pageCount: doc.numPages, pages };
 }
 
-async function convertPdfFileToJson(pdfPath, meta = {}) {
+// ---------- Cleanup pass: token reduction for LLM prompts ----------
+
+const SENTENCE_END = /[.!?…:](["'”’])?\s*$/;
+const BULLET_OR_NUMBER_START = /^[\s]*([•·●▪■◆\-*]|\d+[.)\s]|[A-Z][.)\s]|\([a-z0-9]+\))/;
+const PURE_NOISE = /^[\s\d\W]{0,3}$/; // 0-3 chars of digits/whitespace/punct only
+
+function isNoiseLine(text) {
+  if (!text) return true;
+  const trimmed = text.trim();
+  if (!trimmed) return true;
+  if (PURE_NOISE.test(trimmed)) return true; // page numbers, lone punctuation
+  if (/^\d{1,3}$/.test(trimmed)) return true; // page numbers
+  if (/^[•·●▪■◆\-*]+$/.test(trimmed)) return true; // lone bullet
+  return false;
+}
+
+function reflowParagraphs(elements) {
+  // Merge wrapped paragraph lines: if line A ends without a sentence-ending
+  // mark and line B does not start with a new bullet/number/heading, B is a
+  // continuation of A.
+  const merged = [];
+  for (const el of elements) {
+    const prev = merged[merged.length - 1];
+    if (
+      prev &&
+      prev.type === "paragraph" &&
+      el.type === "paragraph" &&
+      !SENTENCE_END.test(prev.text) &&
+      !BULLET_OR_NUMBER_START.test(el.text)
+    ) {
+      prev.text = `${prev.text} ${el.text.trim()}`.replace(/\s+/g, " ");
+      continue;
+    }
+    merged.push({ ...el });
+  }
+  return merged;
+}
+
+function cleanPages(rawPages) {
+  // Per-page: drop noise + reflow paragraphs. Skip pages that go empty.
+  const cleaned = [];
+  for (const p of rawPages) {
+    const filtered = p.elements.filter((el) => !isNoiseLine(el.text));
+    const reflowed = reflowParagraphs(filtered);
+    if (reflowed.length) {
+      cleaned.push({ page: p.page, elements: reflowed });
+    }
+  }
+  return cleaned;
+}
+
+function toCompactForm(pages) {
+  // Serialize each element as { h } for heading or { p } for paragraph.
+  // Saves ~20-25 bytes per element vs the verbose { type, text } form.
+  return pages.map((page) => ({
+    n: page.page,
+    lines: page.elements.map((el) =>
+      el.type === "heading" ? { h: el.text } : { p: el.text }
+    )
+  }));
+}
+
+function countLines(pages) {
+  return pages.reduce((s, p) => s + (p.elements ? p.elements.length : p.lines.length), 0);
+}
+
+// ---------- Public API ----------
+
+async function convertPdfFileToJson(pdfPath, meta = {}, opts = {}) {
   const buf = fs.readFileSync(pdfPath);
   const { pageCount, pages } = await extractPagesAsJson(buf);
+
+  const wantCleanCompact = opts.compact !== false; // default true
+  const finalPages = wantCleanCompact ? cleanPages(pages) : pages;
+  const serialized = wantCleanCompact ? toCompactForm(finalPages) : finalPages;
+
   return {
     meta: {
-      sourceFile: path.basename(pdfPath),
+      source: path.basename(pdfPath),
       course: meta.course || "",
       module: meta.module || "",
       pageCount,
+      pageCountAfterClean: wantCleanCompact ? serialized.length : pageCount,
+      lineCount: wantCleanCompact
+        ? serialized.reduce((s, p) => s + p.lines.length, 0)
+        : countLines(finalPages),
+      schema: wantCleanCompact ? "compact-v1" : "verbose-v1",
+      schemaHint: wantCleanCompact
+        ? "pages[].lines[] is an array of { h: heading-text } or { p: paragraph-text }. Translate by replacing the string values; keep keys and order identical."
+        : "pages[].elements[] has { type, text }. Translate the text field.",
       generatedAt: new Date().toISOString()
     },
-    pages
+    pages: serialized
   };
 }
 
-async function writePdfJson(pdfPath, jsonOutPath, meta = {}) {
-  const data = await convertPdfFileToJson(pdfPath, meta);
+async function writePdfJson(pdfPath, jsonOutPath, meta = {}, opts = {}) {
+  const data = await convertPdfFileToJson(pdfPath, meta, opts);
   fs.mkdirSync(path.dirname(jsonOutPath), { recursive: true });
-  fs.writeFileSync(jsonOutPath, JSON.stringify(data, null, 2), "utf8");
-  return { path: jsonOutPath, pageCount: data.meta.pageCount, lineCount: data.pages.reduce((s, p) => s + p.elements.length, 0) };
+  // Use 1-space indent in compact mode for further token savings.
+  const indent = opts.compact === false ? 2 : 1;
+  fs.writeFileSync(jsonOutPath, JSON.stringify(data, null, indent), "utf8");
+  return {
+    path: jsonOutPath,
+    pageCount: data.meta.pageCount,
+    pageCountAfterClean: data.meta.pageCountAfterClean,
+    lineCount: data.meta.lineCount,
+    bytes: fs.statSync(jsonOutPath).size
+  };
 }
 
 module.exports = {
   convertPdfFileToJson,
   extractPagesAsJson,
-  writePdfJson
+  writePdfJson,
+  cleanPages,
+  toCompactForm,
+  isNoiseLine
 };

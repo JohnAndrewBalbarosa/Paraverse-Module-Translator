@@ -54,25 +54,35 @@ async function promptStartupMode(savedSummary) {
 }
 
 async function runUseSaved(savedSummary) {
-  console.log("\n[saved] Converting saved PDFs to per-page JSON (no network calls).");
+  console.log("\n[saved] Converting saved PDFs to compact per-page JSON (no network calls).");
   let total = 0;
   let failed = 0;
+  let totalBytes = 0;
   for (const course of savedSummary) {
-    console.log(`\n[saved] === ${course.courseName} (${course.pdfs.length} PDF(s)) ===`);
+    const courseFolder = path.dirname(course.pdfDir);
+    const jsonFolder = path.join(courseFolder, "json");
+    console.log(`\n[saved] === ${course.courseName} (${course.pdfs.length} PDF(s)) -> json/ ===`);
     for (const pdfPath of course.pdfs) {
-      const base = path.basename(pdfPath, path.extname(pdfPath));
-      const jsonOut = path.join(course.pdfDir, `${base}.pages.json`);
+      // Strip the trailing ".source" if present so the JSON filename is clean.
+      let base = path.basename(pdfPath, path.extname(pdfPath));
+      base = base.replace(/\.source$/i, "");
+      const jsonOut = path.join(jsonFolder, `${base}.json`);
       try {
-        const r = await writePdfJson(pdfPath, jsonOut, { course: course.courseName, module: base });
-        console.log(`[saved]   OK   ${path.basename(jsonOut)}  (${r.pageCount} page(s), ${r.lineCount} element(s))`);
+        const r = await writePdfJson(pdfPath, jsonOut, {
+          course: course.courseName,
+          module: base
+        }, { compact: true });
+        const kb = (r.bytes / 1024).toFixed(1);
+        console.log(`[saved]   OK   ${path.basename(jsonOut).padEnd(60)} ${r.pageCountAfterClean}p / ${r.lineCount}lines / ${kb}KB`);
         total += 1;
+        totalBytes += r.bytes;
       } catch (err) {
         console.warn(`[saved]   FAIL ${path.basename(pdfPath)}: ${err.message}`);
         failed += 1;
       }
     }
   }
-  console.log(`\n[saved] Done. ${total} JSON file(s) written, ${failed} failure(s).`);
+  console.log(`\n[saved] Done. ${total} JSON file(s) written (${(totalBytes / 1024).toFixed(1)} KB total), ${failed} failure(s).`);
 }
 
 async function chooseCoursesForScrape(courses) {

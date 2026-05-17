@@ -251,24 +251,27 @@ async function exportTranslatedHtml(outputDir, scrapedData, createTranslator, ru
         });
       }
 
-      // Convert the cached source PDF into per-page JSON for AI translation.
-      // Runs independently of the PPTX flow so a downloaded PDF always gets
-      // its JSON sibling — that's what the user actually consumes.
+      // Convert the cached source PDF into a compact per-page JSON for AI
+      // translation. Lives in a sibling json/ folder (separate from pdf/) and
+      // uses the compact schema by default to minimize prompt tokens.
       try {
         const cachedPdf = path.join(coursePdfFolder, `${fileBase}.source.pdf`);
         if (fs.existsSync(cachedPdf)) {
-          const jsonOut = path.join(coursePdfFolder, `${fileBase}.source.pages.json`);
+          const courseJsonFolder = path.join(courseFolder, "json");
+          const jsonOut = path.join(courseJsonFolder, `${fileBase}.json`);
           const result = await writePdfJson(cachedPdf, jsonOut, {
             course: entry.course.title,
             module: module.title
-          });
+          }, { compact: true });
           moduleFiles.push({
-            fileName: path.join("pdf", path.basename(jsonOut)),
+            fileName: path.join("json", path.basename(jsonOut)),
             href: module.href,
             title: module.title,
             kind: "source-pdf-pages-json",
             pageCount: result.pageCount,
-            lineCount: result.lineCount
+            pageCountAfterClean: result.pageCountAfterClean,
+            lineCount: result.lineCount,
+            bytes: result.bytes
           });
         }
       } catch (err) {
