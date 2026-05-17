@@ -7,6 +7,8 @@
   "scripts": {
     "start": "node src/index.js",
     "login": "node src/index.js --login-only",
+    "check-session": "node scripts/check-session.js",
+    "cookies:snippet": "node scripts/print-cookie-snippet.js",
     "record": "node scripts/patch-recorder-ui.js && node scripts/record.js",
     "record:nopatch": "node scripts/record.js",
     "trace": "playwright show-trace",
@@ -15,6 +17,7 @@
     "record:fresh": "playwright codegen --target=javascript -o recorded.js https://paraverse.feutech.edu.ph"
   },
   "dependencies": {
+    "cheerio": "^1.2.0",
     "dotenv": "^16.4.5",
     "node-fetch": "^2.7.0",
     "pdfjs-dist": "^3.11.174",

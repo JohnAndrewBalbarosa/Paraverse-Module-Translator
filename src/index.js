@@ -5,21 +5,15 @@ const readline = require("node:readline/promises");
 const { stdin, stdout } = require("node:process");
 const { Translator } = require("./translator");
 const { observerMode } = require("./observer");
-const {
-  launchContext,
-  waitForLogin,
-  extractCourseNodes,
-  clusterByColumn,
-  pickCurrentTermForRegular,
-  pickCurrentTermForIrregular,
-  scrapeModulesForCourses,
-  exportTranslatedHtml
-} = require("./paraverse");
+const browserAdapter = require("./paraverse");
+const headlessAdapter = require("./paraverseHeadless");
+const { createHttpClient, SessionExpiredError } = require("./httpClient");
 
 function parseArgs(argv) {
   return {
     loginOnly: argv.includes("--login-only"),
-    observe: argv.includes("--observe")
+    observe: argv.includes("--observe"),
+    useBrowser: argv.includes("--use-browser")
   };
 }
 
@@ -240,14 +234,112 @@ async function askTranslationPreferences(defaults) {
   }
 }
 
-async function main() {
-  const args = parseArgs(process.argv.slice(2));
+async function runHeadless(args) {
+  let http;
+  try {
+    http = createHttpClient();
+  } catch (err) {
+    if (err.code === "COOKIES_MISSING" || err.code === "COOKIES_EMPTY" || err.code === "COOKIES_INVALID") {
+      console.error(`\n[auth] ${err.message}`);
+      console.error("[auth] See docs/cookie-refresh.md, then re-run.");
+      process.exitCode = 1;
+      return;
+    }
+    throw err;
+  }
 
-  const context = await launchContext(config);
+  if (args.loginOnly) {
+    try {
+      await http.fetchHtml(config.curriculumUrl);
+      console.log("Session is valid. Cookies in cookies.json are working.");
+    } catch (err) {
+      if (err instanceof SessionExpiredError) {
+        console.error(`\n[auth] Session expired: ${err.message}`);
+        console.error("[auth] Refresh cookies.json — see docs/cookie-refresh.md.");
+        process.exitCode = 1;
+        return;
+      }
+      throw err;
+    }
+    return;
+  }
+
+  if (args.observe) {
+    console.warn("--observe is only available with --use-browser. Falling back to Playwright observe mode.");
+    return runBrowser(args);
+  }
+
+  const nodes = await headlessAdapter.loadCurriculumCourses(http, config.curriculumUrl);
+  if (!nodes.length) {
+    throw new Error("No course nodes found on curriculum page. Cookies may be valid but page structure changed.");
+  }
+
+  const columns = headlessAdapter.clusterByColumn(nodes);
+  const currentTerm = config.studentMode === "regular"
+    ? headlessAdapter.pickCurrentTermForRegular(columns)
+    : headlessAdapter.pickCurrentTermForIrregular(columns);
+
+  if (!currentTerm) {
+    throw new Error(
+      `Could not determine current term for mode: ${config.studentMode}. ` +
+      "Switch STUDENT_MODE or update term detection in src/htmlExtract.js."
+    );
+  }
+
+  const uniqueCourses = [];
+  const seen = new Set();
+  for (const course of currentTerm.nodes) {
+    const key = course.courseCode || course.href || course.title;
+    if (!seen.has(key)) {
+      seen.add(key);
+      uniqueCourses.push(course);
+    }
+  }
+
+  console.log(`Detected term column #${currentTerm.index + 1} with ${uniqueCourses.length} course(s).`);
+
+  const selectedCourses = await chooseCoursesForScrape(uniqueCourses);
+
+  const scraped = await headlessAdapter.scrapeModulesForCourses(http, selectedCourses, {
+    scanMode: "strict",
+    curriculumUrl: config.curriculumUrl,
+    curriculumCode: config.curriculumCode
+  });
+
+  printScrapeSummary(scraped, "strict");
+
+  const preferences = await askTranslationPreferences({
+    targetLanguage: config.targetLanguage,
+    translationStyle: config.translationStyle
+  });
+
+  const createTranslator = () => new Translator({
+    targetLanguage: preferences.targetLanguage,
+    style: preferences.translationStyle,
+    researchProvider: config.researchProvider,
+    researchApiKey: config.researchApiKey,
+    researchBaseUrl: config.researchBaseUrl,
+    researchModel: config.researchModel,
+    disableCache: true
+  });
+
+  const manifestPath = await headlessAdapter.exportTranslatedHtml(
+    config.outputDir,
+    scraped,
+    createTranslator,
+    { requestContext: http.asRequestContextShim() }
+  );
+
+  console.log("Done.");
+  console.log(`Manifest: ${manifestPath}`);
+}
+
+async function runBrowser(args) {
+  const context = await browserAdapter.launchContext(config);
   const page = await context.newPage();
 
   try {
-    await waitForLogin(page);
+    await browserAdapter.waitForLogin(page);
 
     if (args.loginOnly) {
       console.log("Login session initialized. You may now run: npm start");
@@ -261,19 +353,15 @@ async function main() {
 
     await page.goto(config.curriculumUrl, { waitUntil: "domcontentloaded" });
 
-    const nodes = await extractCourseNodes(page);
+    const nodes = await browserAdapter.extractCourseNodes(page);
     if (!nodes.length) {
       throw new Error("No course nodes found on curriculum page. Verify login and page structure.");
     }
 
-    const columns = clusterByColumn(nodes);
-    let currentTerm = null;
-
-    if (config.studentMode === "regular") {
-      currentTerm = pickCurrentTermForRegular(columns);
-    } else {
-      currentTerm = pickCurrentTermForIrregular(columns);
-    }
+    const columns = browserAdapter.clusterByColumn(nodes);
+    const currentTerm = config.studentMode === "regular"
+      ? browserAdapter.pickCurrentTermForRegular(columns)
+      : browserAdapter.pickCurrentTermForIrregular(columns);
 
     if (!currentTerm) {
       throw new Error(
@@ -296,7 +384,7 @@ async function main() {
 
     const selectedCourses = await chooseCoursesForScrape(uniqueCourses);
 
-    let scraped = await scrapeModulesForCourses(context, selectedCourses, {
+    let scraped = await browserAdapter.scrapeModulesForCourses(context, selectedCourses, {
       scanMode: "strict",
       curriculumUrl: config.curriculumUrl,
       curriculumCode: config.curriculumCode
@@ -320,7 +408,7 @@ async function main() {
       disableCache: true
     });
 
-    const manifestPath = await exportTranslatedHtml(config.outputDir, scraped, createTranslator, {
+    const manifestPath = await browserAdapter.exportTranslatedHtml(config.outputDir, scraped, createTranslator, {
       requestContext: context.request
     });
 
@@ -332,7 +420,21 @@ async function main() {
   }
 }
 
+async function main() {
+  const args = parseArgs(process.argv.slice(2));
+  if (args.useBrowser) {
+    await runBrowser(args);
+  } else {
+    await runHeadless(args);
+  }
+}
+
 main().catch((err) => {
-  console.error(err);
+  if (err && err.code === "SESSION_EXPIRED") {
+    console.error(`\n[auth] ${err.message}`);
+    console.error("[auth] Refresh cookies.json — see docs/cookie-refresh.md.");
+  } else {
+    console.error(err);
+  }
   process.exitCode = 1;
 });

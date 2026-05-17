@@ -11,6 +11,10 @@ sessions/profile/
 sessions/
 output/
 
+# Cookie jars (contain auth tokens — never commit)
+cookies.json
+cookies.txt
+
 # Logs
 *.log
 npm-debug.log*
