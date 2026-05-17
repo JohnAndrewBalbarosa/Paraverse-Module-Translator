@@ -4,16 +4,13 @@ const path = require("node:path");
 const readline = require("node:readline/promises");
 const { stdin, stdout } = require("node:process");
 const { Translator } = require("./translator");
-const { observerMode } = require("./observer");
-const browserAdapter = require("./paraverse");
 const headlessAdapter = require("./paraverseHeadless");
 const { createHttpClient, SessionExpiredError } = require("./httpClient");
+const { safeFileName } = require("./utils");
 
 function parseArgs(argv) {
   return {
-    loginOnly: argv.includes("--login-only"),
-    observe: argv.includes("--observe"),
-    useBrowser: argv.includes("--use-browser")
+    loginOnly: argv.includes("--login-only")
   };
 }
 
@@ -49,173 +46,43 @@ async function chooseCoursesForScrape(courses) {
   }
 }
 
-function buildStrictRelaxedAudit(strictScraped, relaxedScraped) {
-  const relaxedByCourse = new Map(relaxedScraped.map((entry) => [entry.course.href, entry]));
-  const courses = [];
-
-  for (const strictEntry of strictScraped) {
-    const relaxedEntry = relaxedByCourse.get(strictEntry.course.href);
-    const strictLinks = strictEntry.modulePages.map((m) => m.href);
-    const relaxedLinks = (relaxedEntry?.modulePages || []).map((m) => m.href);
-
-    const strictSet = new Set(strictLinks);
-    const relaxedSet = new Set(relaxedLinks);
-
-    const extraInRelaxed = relaxedLinks.filter((href) => !strictSet.has(href));
-    const missingInRelaxed = strictLinks.filter((href) => !relaxedSet.has(href));
-
-    courses.push({
-      courseTitle: strictEntry.course.title,
-      courseUrl: strictEntry.course.href,
-      strictCount: strictLinks.length,
-      relaxedCount: relaxedLinks.length,
-      extraInRelaxed,
-      missingInRelaxed
-    });
-  }
-
-  return {
-    generatedAt: new Date().toISOString(),
-    strictCourseCount: strictScraped.length,
-    relaxedCourseCount: relaxedScraped.length,
-    courses
-  };
-}
-
-function writeAuditFile(outputDir, auditData) {
-  const filePath = path.join(outputDir, "audit-strict-vs-relaxed.json");
-  fs.mkdirSync(outputDir, { recursive: true });
-  fs.writeFileSync(filePath, JSON.stringify(auditData, null, 2), "utf8");
-  return filePath;
-}
-
-function printScrapeSummary(scraped, scanMode) {
+function printScrapeSummary(scraped) {
   console.log("\n=== Scrape Summary ===");
-  console.log(`Scan mode: ${scanMode}`);
   let totalModules = 0;
+  let totalWithPdf = 0;
   for (let i = 0; i < scraped.length; i += 1) {
     const entry = scraped[i];
     const count = entry.modulePages.length;
+    const withPdf = entry.modulePages.filter((m) => /\.(pdf|pptx?)(\?|$)/i.test(m.href || "")).length;
     totalModules += count;
-    console.log(`${i + 1}. ${entry.course.title} -> ${count} module page(s)`);
+    totalWithPdf += withPdf;
+    const flag = withPdf < count ? ` [WARN: ${count - withPdf} without file URL]` : "";
+    console.log(`${i + 1}. ${entry.course.title} -> ${count} module(s), ${withPdf} with PDF URL${flag}`);
   }
-  console.log(`Total module pages: ${totalModules}`);
+  console.log(`Total: ${totalModules} module(s), ${totalWithPdf} with downloadable URLs`);
 }
 
-function printDetailedModules(scraped) {
-  console.log("\n=== Detailed Modules ===");
-  for (let i = 0; i < scraped.length; i += 1) {
-    const entry = scraped[i];
-    console.log(`\n[${i + 1}] ${entry.course.title}`);
-    for (let j = 0; j < entry.modulePages.length; j += 1) {
-      const module = entry.modulePages[j];
-      const status = module.error ? `ERROR: ${module.error}` : "OK";
-      console.log(`  - (${j + 1}) ${module.title} | ${status}`);
-      console.log(`    ${module.href}`);
+function verifyOutputCounts(scraped, outputDir) {
+  console.log("\n=== Verification: modules vs downloaded PDFs ===");
+  let allMatch = true;
+  for (const entry of scraped) {
+    const moduleCount = entry.modulePages.length;
+    const courseFolder = path.join(outputDir, safeFileName(entry.course.title || entry.course.href));
+    const pdfDir = path.join(courseFolder, "pdf");
+    let pdfCount = 0;
+    if (fs.existsSync(pdfDir)) {
+      pdfCount = fs.readdirSync(pdfDir).filter((f) => /\.(pdf|pptx?)$/i.test(f)).length;
     }
+    const ok = pdfCount >= moduleCount;
+    if (!ok) allMatch = false;
+    const mark = ok ? "OK " : "FAIL";
+    console.log(`  [${mark}] ${entry.course.title}: ${moduleCount} module(s) detected, ${pdfCount} file(s) downloaded`);
   }
-}
-
-async function validateExpectedCounts(scraped, rl) {
-  console.log("\nEnter expected module count per course. Leave blank to skip a course.");
-  const issues = [];
-  for (let i = 0; i < scraped.length; i += 1) {
-    const entry = scraped[i];
-    const answer = await rl.question(`Expected modules for ${entry.course.title}: `);
-    const trimmed = answer.trim();
-    if (!trimmed) {
-      continue;
-    }
-
-    const expected = Number.parseInt(trimmed, 10);
-    if (Number.isNaN(expected) || expected < 0) {
-      issues.push(`Invalid expected count for ${entry.course.title}`);
-      continue;
-    }
-
-    const found = entry.modulePages.length;
-    if (found < expected) {
-      issues.push(`${entry.course.title}: expected at least ${expected}, found ${found}`);
-    }
-  }
-
-  if (!issues.length) {
-    console.log("Validation passed: no missing module warning based on your inputs.");
+  if (allMatch) {
+    console.log("All courses: PDF count matches module count.");
   } else {
-    console.log("Validation warnings:");
-    for (const issue of issues) {
-      console.log(`- ${issue}`);
-    }
+    console.log("WARNING: Some courses have fewer downloaded files than detected modules. Check logs above.");
   }
-}
-
-async function reviewScrapeMenu(context, courses, initialScraped) {
-  let scraped = initialScraped;
-  let scanMode = initialScraped[0]?.scanMode || "strict";
-
-  const rl = readline.createInterface({ input: stdin, output: stdout });
-  try {
-    let done = false;
-    while (!done) {
-      printScrapeSummary(scraped, scanMode);
-      console.log("\nMenu:");
-      console.log("1) Show detailed module list");
-      console.log("2) Validate expected counts");
-      console.log("3) Re-scan current term (strict)");
-      console.log("4) Re-scan current term (relaxed)");
-      console.log("5) Generate strict-vs-relaxed audit JSON");
-      console.log("6) Continue to translation/export");
-      console.log("7) Abort");
-
-      const choice = (await rl.question("Choose option [1-7]: ")).trim();
-      if (choice === "1") {
-        printDetailedModules(scraped);
-      } else if (choice === "2") {
-        await validateExpectedCounts(scraped, rl);
-      } else if (choice === "3") {
-        console.log("Re-scanning in strict mode...");
-        scraped = await scrapeModulesForCourses(context, courses, {
-          scanMode: "strict",
-          curriculumUrl: config.curriculumUrl,
-          curriculumCode: config.curriculumCode
-        });
-        scanMode = "strict";
-      } else if (choice === "4") {
-        console.log("Re-scanning in relaxed mode...");
-        scraped = await scrapeModulesForCourses(context, courses, {
-          scanMode: "relaxed",
-          curriculumUrl: config.curriculumUrl,
-          curriculumCode: config.curriculumCode
-        });
-        scanMode = "relaxed";
-      } else if (choice === "5") {
-        console.log("Building strict-vs-relaxed audit. This runs both scans for comparison...");
-        const strictData = await scrapeModulesForCourses(context, courses, {
-          scanMode: "strict",
-          curriculumUrl: config.curriculumUrl,
-          curriculumCode: config.curriculumCode
-        });
-        const relaxedData = await scrapeModulesForCourses(context, courses, {
-          scanMode: "relaxed",
-          curriculumUrl: config.curriculumUrl,
-          curriculumCode: config.curriculumCode
-        });
-        const audit = buildStrictRelaxedAudit(strictData, relaxedData);
-        const auditPath = writeAuditFile(config.outputDir, audit);
-        console.log(`Audit written: ${auditPath}`);
-      } else if (choice === "6") {
-        done = true;
-      } else if (choice === "7") {
-        throw new Error("Aborted by user from CLI menu.");
-      } else {
-        console.log("Invalid choice. Please choose 1 to 7.");
-      }
-    }
-  } finally {
-    rl.close();
-  }
-
-  return { scraped, scanMode };
 }
 
 async function askTranslationPreferences(defaults) {
@@ -264,11 +131,6 @@ async function runHeadless(args) {
     return;
   }
 
-  if (args.observe) {
-    console.warn("--observe is only available with --use-browser. Falling back to Playwright observe mode.");
-    return runBrowser(args);
-  }
-
   const nodes = await headlessAdapter.loadCurriculumCourses(http, config.curriculumUrl);
   if (!nodes.length) {
     throw new Error("No course nodes found on curriculum page. Cookies may be valid but page structure changed.");
@@ -306,7 +168,7 @@ async function runHeadless(args) {
     curriculumCode: config.curriculumCode
   });
 
-  printScrapeSummary(scraped, "strict");
+  printScrapeSummary(scraped);
 
   const preferences = await askTranslationPreferences({
     targetLanguage: config.targetLanguage,
@@ -330,103 +192,15 @@ async function runHeadless(args) {
     { requestContext: http.asRequestContextShim() }
   );
 
-  console.log("Done.");
+  verifyOutputCounts(scraped, config.outputDir);
+
+  console.log("\nDone.");
   console.log(`Manifest: ${manifestPath}`);
-}
-
-async function runBrowser(args) {
-  const context = await browserAdapter.launchContext(config);
-  const page = await context.newPage();
-
-  try {
-    await browserAdapter.waitForLogin(page);
-
-    if (args.loginOnly) {
-      console.log("Login session initialized. You may now run: npm start");
-      return;
-    }
-
-    if (args.observe) {
-      await observerMode(context, config.outputDir);
-      return;
-    }
-
-    await page.goto(config.curriculumUrl, { waitUntil: "domcontentloaded" });
-
-    const nodes = await browserAdapter.extractCourseNodes(page);
-    if (!nodes.length) {
-      throw new Error("No course nodes found on curriculum page. Verify login and page structure.");
-    }
-
-    const columns = browserAdapter.clusterByColumn(nodes);
-    const currentTerm = config.studentMode === "regular"
-      ? browserAdapter.pickCurrentTermForRegular(columns)
-      : browserAdapter.pickCurrentTermForIrregular(columns);
-
-    if (!currentTerm) {
-      throw new Error(
-        `Could not determine current term for mode: ${config.studentMode}. ` +
-        "You can switch STUDENT_MODE or update term detection in src/paraverse.js."
-      );
-    }
-
-    const uniqueCourses = [];
-    const seen = new Set();
-    for (const course of currentTerm.nodes) {
-      const key = course.courseCode || course.href || course.title;
-      if (!seen.has(key)) {
-        seen.add(key);
-        uniqueCourses.push(course);
-      }
-    }
-
-    console.log(`Detected term column #${currentTerm.index + 1} with ${uniqueCourses.length} course(s).`);
-
-    const selectedCourses = await chooseCoursesForScrape(uniqueCourses);
-
-    let scraped = await browserAdapter.scrapeModulesForCourses(context, selectedCourses, {
-      scanMode: "strict",
-      curriculumUrl: config.curriculumUrl,
-      curriculumCode: config.curriculumCode
-    });
-
-    const reviewed = await reviewScrapeMenu(context, selectedCourses, scraped);
-    scraped = reviewed.scraped;
-
-    const preferences = await askTranslationPreferences({
-      targetLanguage: config.targetLanguage,
-      translationStyle: config.translationStyle
-    });
-
-    const createTranslator = () => new Translator({
-      targetLanguage: preferences.targetLanguage,
-      style: preferences.translationStyle,
-      researchProvider: config.researchProvider,
-      researchApiKey: config.researchApiKey,
-      researchBaseUrl: config.researchBaseUrl,
-      researchModel: config.researchModel,
-      disableCache: true
-    });
-
-    const manifestPath = await browserAdapter.exportTranslatedHtml(config.outputDir, scraped, createTranslator, {
-      requestContext: context.request
-    });
-
-    console.log("Done.");
-    console.log(`Manifest: ${manifestPath}`);
-  } finally {
-    await page.close();
-    await context.close();
-  }
 }
 
 async function main() {
   const args = parseArgs(process.argv.slice(2));
-  if (args.useBrowser) {
-    await runBrowser(args);
-  } else {
-    await runHeadless(args);
-  }
+  await runHeadless(args);
 }
 
 main().catch((err) => {
