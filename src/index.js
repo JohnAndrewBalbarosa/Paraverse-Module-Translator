@@ -7,11 +7,72 @@ const { Translator } = require("./translator");
 const headlessAdapter = require("./paraverseHeadless");
 const { createHttpClient, SessionExpiredError } = require("./httpClient");
 const { safeFileName } = require("./utils");
+const { writePdfJson } = require("./pdfToJson");
 
 function parseArgs(argv) {
   return {
-    loginOnly: argv.includes("--login-only")
+    loginOnly: argv.includes("--login-only"),
+    useSaved: argv.includes("--use-saved"),
+    fresh: argv.includes("--fresh")
   };
+}
+
+function findSavedPdfs(outputDir) {
+  if (!fs.existsSync(outputDir)) return [];
+  const courses = [];
+  for (const courseName of fs.readdirSync(outputDir)) {
+    const pdfDir = path.join(outputDir, courseName, "pdf");
+    if (!fs.existsSync(pdfDir)) continue;
+    const pdfs = fs
+      .readdirSync(pdfDir)
+      .filter((f) => /\.pdf$/i.test(f))
+      .map((f) => path.join(pdfDir, f));
+    if (pdfs.length) courses.push({ courseName, pdfDir, pdfs });
+  }
+  return courses;
+}
+
+async function promptStartupMode(savedSummary) {
+  // Honor CLI flags first.
+  // process.argv inspected outside — handled in main()
+  const total = savedSummary.reduce((s, c) => s + c.pdfs.length, 0);
+  console.log("\n=== Paraverse Module Translator ===");
+  console.log(`Found ${total} previously-downloaded PDF(s) across ${savedSummary.length} course(s) in output/.\n`);
+  console.log("  1) Fresh login + scrape (download new PDFs, overwrites cache)");
+  console.log("  2) Use saved PDFs only (skip login, just convert existing PDFs to JSON)");
+  console.log("  3) Quit");
+
+  const rl = readline.createInterface({ input: stdin, output: stdout });
+  try {
+    const answer = (await rl.question("\nChoose [1-3]: ")).trim();
+    if (answer === "2") return "use-saved";
+    if (answer === "3") return "quit";
+    return "fresh";
+  } finally {
+    rl.close();
+  }
+}
+
+async function runUseSaved(savedSummary) {
+  console.log("\n[saved] Converting saved PDFs to per-page JSON (no network calls).");
+  let total = 0;
+  let failed = 0;
+  for (const course of savedSummary) {
+    console.log(`\n[saved] === ${course.courseName} (${course.pdfs.length} PDF(s)) ===`);
+    for (const pdfPath of course.pdfs) {
+      const base = path.basename(pdfPath, path.extname(pdfPath));
+      const jsonOut = path.join(course.pdfDir, `${base}.pages.json`);
+      try {
+        const r = await writePdfJson(pdfPath, jsonOut, { course: course.courseName, module: base });
+        console.log(`[saved]   OK   ${path.basename(jsonOut)}  (${r.pageCount} page(s), ${r.lineCount} element(s))`);
+        total += 1;
+      } catch (err) {
+        console.warn(`[saved]   FAIL ${path.basename(pdfPath)}: ${err.message}`);
+        failed += 1;
+      }
+    }
+  }
+  console.log(`\n[saved] Done. ${total} JSON file(s) written, ${failed} failure(s).`);
 }
 
 async function chooseCoursesForScrape(courses) {
@@ -202,7 +263,35 @@ async function runHeadless(args) {
 
 async function main() {
   const args = parseArgs(process.argv.slice(2));
-  await runHeadless(args);
+
+  // --login-only short-circuits to the auth check, no prompts.
+  if (args.loginOnly) {
+    return runHeadless(args);
+  }
+
+  const savedSummary = findSavedPdfs(config.outputDir);
+  let mode = "fresh";
+  if (args.useSaved) {
+    mode = "use-saved";
+  } else if (args.fresh) {
+    mode = "fresh";
+  } else if (savedSummary.length > 0) {
+    mode = await promptStartupMode(savedSummary);
+  }
+
+  if (mode === "quit") {
+    console.log("Aborted.");
+    return;
+  }
+  if (mode === "use-saved") {
+    if (!savedSummary.length) {
+      console.error("[saved] No saved PDFs found in output/. Run without --use-saved to download first.");
+      process.exitCode = 1;
+      return;
+    }
+    return runUseSaved(savedSummary);
+  }
+  return runHeadless(args);
 }
 
 main().catch((err) => {

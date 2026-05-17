@@ -14,6 +14,7 @@ const { ensureDir, safeFileName, writeModuleJson } = require("./utils");
 const { translateHtmlPreservingMarkup, buildPageObjectFromHtml } = require("./htmlTranslate");
 const { translatePageObject } = require("./pageObjectTranslator");
 const { generateTranslatedPptFromPdf } = require("./pdfPptTranslate");
+const { writePdfJson } = require("./pdfToJson");
 
 const PARAVERSE_ORIGIN = "https://paraverse.feutech.edu.ph";
 
@@ -246,6 +247,36 @@ async function exportTranslatedHtml(outputDir, scrapedData, createTranslator, ru
           href: module.href,
           title: module.title,
           kind: "translated-pptx-error",
+          error: err.message
+        });
+      }
+
+      // Convert the cached source PDF into per-page JSON for AI translation.
+      // Runs independently of the PPTX flow so a downloaded PDF always gets
+      // its JSON sibling — that's what the user actually consumes.
+      try {
+        const cachedPdf = path.join(coursePdfFolder, `${fileBase}.source.pdf`);
+        if (fs.existsSync(cachedPdf)) {
+          const jsonOut = path.join(coursePdfFolder, `${fileBase}.source.pages.json`);
+          const result = await writePdfJson(cachedPdf, jsonOut, {
+            course: entry.course.title,
+            module: module.title
+          });
+          moduleFiles.push({
+            fileName: path.join("pdf", path.basename(jsonOut)),
+            href: module.href,
+            title: module.title,
+            kind: "source-pdf-pages-json",
+            pageCount: result.pageCount,
+            lineCount: result.lineCount
+          });
+        }
+      } catch (err) {
+        moduleFiles.push({
+          fileName: "",
+          href: module.href,
+          title: module.title,
+          kind: "source-pdf-pages-json-error",
           error: err.message
         });
       }
