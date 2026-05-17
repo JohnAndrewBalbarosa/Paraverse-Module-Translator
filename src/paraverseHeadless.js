@@ -147,6 +147,8 @@ async function exportTranslatedHtml(outputDir, scrapedData, createTranslator, ru
     fs.rmSync(coursePdfFolder, { recursive: true, force: true });
     ensureDir(coursePdfFolder);
 
+    console.log(`[export] === ${entry.course.title} (${entry.modulePages.length} module(s)) ===`);
+
     const courseTranslator = createTranslator();
     const translatedCourseHtml = await translateHtmlPreservingMarkup(entry.courseHtml, courseTranslator);
     const courseFile = path.join(courseFolder, "course.html");
@@ -156,6 +158,7 @@ async function exportTranslatedHtml(outputDir, scrapedData, createTranslator, ru
     for (let i = 0; i < entry.modulePages.length; i += 1) {
       const module = entry.modulePages[i];
       if (!module.html) continue;
+      console.log(`[export]   module ${i + 1}/${entry.modulePages.length}: ${module.title.slice(0, 60)}`);
 
       const moduleTranslator = createTranslator();
       const translatedModuleHtml = await translateHtmlPreservingMarkup(module.html, moduleTranslator);

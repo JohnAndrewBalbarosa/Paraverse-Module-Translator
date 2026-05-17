@@ -79,12 +79,29 @@ async function downloadBinary(requestContext, assetUrl) {
     throw new Error("Missing authenticated request context.");
   }
 
-  const response = await requestContext.get(assetUrl, { timeout: 30000 });
-  if (!response.ok()) {
-    throw new Error(`Failed to download asset (${response.status()}): ${assetUrl}`);
+  const MAX_ATTEMPTS = 3;
+  let lastErr;
+  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt += 1) {
+    try {
+      const response = await requestContext.get(assetUrl, { timeout: 60000 });
+      if (!response.ok()) {
+        throw new Error(`Failed to download asset (${response.status()}): ${assetUrl}`);
+      }
+      return response.body();
+    } catch (err) {
+      lastErr = err;
+      const transient = /socket hang up|ECONNRESET|ETIMEDOUT|EAI_AGAIN|network/i.test(err.message || "");
+      if (attempt < MAX_ATTEMPTS && transient) {
+        const backoffMs = 1000 * attempt;
+        // eslint-disable-next-line no-console
+        console.warn(`  [retry ${attempt}/${MAX_ATTEMPTS - 1}] ${err.message} -> waiting ${backoffMs}ms`);
+        await new Promise((r) => setTimeout(r, backoffMs));
+        continue;
+      }
+      throw err;
+    }
   }
-
-  return response.body();
+  throw lastErr;
 }
 
 async function cacheAsset(requestContext, assetUrl, cacheFilePath) {

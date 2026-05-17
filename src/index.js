@@ -86,16 +86,18 @@ function verifyOutputCounts(scraped, outputDir) {
 }
 
 async function askTranslationPreferences(defaults) {
+  // If TARGET_LANGUAGE is already set in .env, skip the prompt entirely.
+  // Lets `npm start` run unattended for CI/monitoring scenarios.
+  if (defaults.targetLanguage && String(defaults.targetLanguage).trim()) {
+    return { targetLanguage: String(defaults.targetLanguage).trim(), translationStyle: "" };
+  }
   const rl = readline.createInterface({ input: stdin, output: stdout });
   try {
     const languageAnswer = await rl.question(
-      `Target language (example: tl, en, tagalog)${defaults.targetLanguage ? ` [${defaults.targetLanguage}]` : ""}: `
+      `Target language (example: tl, en, tagalog) [tl]: `
     );
-
-    const targetLanguage = (languageAnswer || defaults.targetLanguage || "tl").trim();
-    const translationStyle = "";
-
-    return { targetLanguage, translationStyle };
+    const targetLanguage = (languageAnswer || "tl").trim();
+    return { targetLanguage, translationStyle: "" };
   } finally {
     rl.close();
   }
