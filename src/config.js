@@ -16,6 +16,10 @@ module.exports = {
   targetLanguage: process.env.TARGET_LANGUAGE || "",
   translationStyle: process.env.TRANSLATION_STYLE || "",
   studentMode: process.env.STUDENT_MODE || "regular",
+  // Translator backend selector: "manual" (Claude/human writes JSONs),
+  // "gemini" (Google Gemini API), or "identity" (passthrough/no-op).
+  // If unset, defaults to manual when no API key is configured, else gemini.
+  translator: process.env.TRANSLATOR || "",
   researchProvider: process.env.RESEARCH_PROVIDER || (process.env.RESEARCH_API_KEY ? "openai" : ""),
   researchApiKey: process.env.RESEARCH_API_KEY || process.env.OPENAI_API_KEY || "",
   // Leave empty when not set so translatorClient can pick the right default per
