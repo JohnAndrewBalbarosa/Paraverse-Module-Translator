@@ -241,7 +241,7 @@ async function runHeadless(args) {
   } catch (err) {
     if (err.code === "COOKIES_MISSING" || err.code === "COOKIES_EMPTY" || err.code === "COOKIES_INVALID") {
       console.error(`\n[auth] ${err.message}`);
-      console.error("[auth] See docs/cookie-refresh.md, then re-run.");
+      console.error("[auth] See docs/sign-in.md (or run: npm run login), then re-run.");
       process.exitCode = 1;
       return;
     }
@@ -255,7 +255,7 @@ async function runHeadless(args) {
     } catch (err) {
       if (err instanceof SessionExpiredError) {
         console.error(`\n[auth] Session expired: ${err.message}`);
-        console.error("[auth] Refresh cookies.json — see docs/cookie-refresh.md.");
+        console.error("[auth] Refresh cookies.json — see docs/sign-in.md (or run: npm run login).");
         process.exitCode = 1;
         return;
       }
@@ -432,7 +432,7 @@ async function main() {
 main().catch((err) => {
   if (err && err.code === "SESSION_EXPIRED") {
     console.error(`\n[auth] ${err.message}`);
-    console.error("[auth] Refresh cookies.json — see docs/cookie-refresh.md.");
+    console.error("[auth] Refresh cookies.json — see docs/sign-in.md (or run: npm run login).");
   } else {
     console.error(err);
   }

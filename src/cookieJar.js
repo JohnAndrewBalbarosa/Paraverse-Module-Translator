@@ -10,7 +10,7 @@ function readCookieFile(cookiesPath) {
   if (!fs.existsSync(filePath)) {
     const err = new Error(
       `Cookie jar not found at ${filePath}. ` +
-      `Run \`npm run cookies:snippet\` for instructions on how to populate it.`
+      `Run \`npm run login\` to sign in once (headless) — it will write cookies.json for you.`
     );
     err.code = "COOKIES_MISSING";
     throw err;

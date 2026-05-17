@@ -6,9 +6,8 @@
   "type": "commonjs",
   "scripts": {
     "start": "node src/index.js",
-    "login": "node src/index.js --login-only",
+    "login": "node scripts/login.js",
     "check-session": "node scripts/check-session.js",
-    "cookies:snippet": "node scripts/print-cookie-snippet.js",
     "record": "node scripts/patch-recorder-ui.js && node scripts/record.js",
     "record:nopatch": "node scripts/record.js",
     "trace": "playwright show-trace",

@@ -61,7 +61,7 @@ function createHttpClient(options = {}) {
     if (isLoginRedirectUrl(response.url)) {
       throw new SessionExpiredError(
         `Request to ${url} was redirected to the login page (${response.url}). ` +
-        `Refresh cookies.json — see docs/cookie-refresh.md.`,
+        `Run: npm run login`,
         { requestedUrl: url, finalUrl: response.url }
       );
     }
@@ -77,7 +77,7 @@ function createHttpClient(options = {}) {
     const text = await response.text();
     if (looksLikeLoginBody(text) && /microsoftonline|name="loginfmt"/i.test(text)) {
       throw new SessionExpiredError(
-        `Response from ${url} looks like a Microsoft login page. Refresh cookies.json.`,
+        `Response from ${url} looks like a Microsoft login page. Run: npm run login`,
         { requestedUrl: url, finalUrl: response.url }
       );
     }
