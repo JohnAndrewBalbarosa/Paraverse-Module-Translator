@@ -257,5 +257,7 @@ async function generateTranslatedPptFromPdf(options) {
 
 module.exports = {
   extractSourceAssetUrl,
-  generateTranslatedPptFromPdf
+  generateTranslatedPptFromPdf,
+  cacheAsset,
+  detectAssetType
 };

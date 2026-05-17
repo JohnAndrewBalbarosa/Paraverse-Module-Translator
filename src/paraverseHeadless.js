@@ -10,10 +10,8 @@ const {
   extractModuleAssetUrls,
   pickPresentationUrl
 } = require("./htmlExtract");
-const { ensureDir, safeFileName, writeModuleJson } = require("./utils");
-const { translateHtmlPreservingMarkup, buildPageObjectFromHtml } = require("./htmlTranslate");
-const { translatePageObject } = require("./pageObjectTranslator");
-const { generateTranslatedPptFromPdf } = require("./pdfPptTranslate");
+const { ensureDir, safeFileName } = require("./utils");
+const { cacheAsset, detectAssetType, extractSourceAssetUrl } = require("./pdfPptTranslate");
 const { writePdfJson } = require("./pdfToJson");
 
 const PARAVERSE_ORIGIN = "https://paraverse.feutech.edu.ph";
@@ -136,6 +134,30 @@ async function scrapeModulesForCourses(http, courses, options = {}) {
   return results;
 }
 
+// Files/dirs that may legitimately live at the course folder root. Anything
+// else (legacy .html stubs, old .json page-objects, .translated.pptx, etc.)
+// gets pruned before each export so old runs don't leave junk behind.
+const KEEP_AT_COURSE_ROOT = new Set(["pdf", "json"]);
+
+function cleanCourseFolder(courseFolder) {
+  if (!fs.existsSync(courseFolder)) return 0;
+  let removed = 0;
+  for (const name of fs.readdirSync(courseFolder)) {
+    if (KEEP_AT_COURSE_ROOT.has(name)) continue;
+    const full = path.join(courseFolder, name);
+    try {
+      const stat = fs.statSync(full);
+      if (stat.isFile()) {
+        fs.unlinkSync(full);
+        removed += 1;
+      }
+    } catch {
+      // ignore
+    }
+  }
+  return removed;
+}
+
 async function exportTranslatedHtml(outputDir, scrapedData, createTranslator, runtimeOptions = {}) {
   ensureDir(outputDir);
   const requestContext = runtimeOptions.requestContext;
@@ -144,150 +166,86 @@ async function exportTranslatedHtml(outputDir, scrapedData, createTranslator, ru
   for (const entry of scrapedData) {
     const courseFolder = path.join(outputDir, safeFileName(entry.course.title || entry.course.href));
     ensureDir(courseFolder);
+
+    const pruned = cleanCourseFolder(courseFolder);
+    if (pruned > 0) {
+      console.log(`[export] === ${entry.course.title} (cleaned ${pruned} legacy file(s)) ===`);
+    } else {
+      console.log(`[export] === ${entry.course.title} ===`);
+    }
+
     const coursePdfFolder = path.join(courseFolder, "pdf");
-    fs.rmSync(coursePdfFolder, { recursive: true, force: true });
+    const courseJsonFolder = path.join(courseFolder, "json");
     ensureDir(coursePdfFolder);
-
-    console.log(`[export] === ${entry.course.title} (${entry.modulePages.length} module(s)) ===`);
-
-    const courseTranslator = createTranslator();
-    const translatedCourseHtml = await translateHtmlPreservingMarkup(entry.courseHtml, courseTranslator);
-    const courseFile = path.join(courseFolder, "course.html");
-    fs.writeFileSync(courseFile, translatedCourseHtml, "utf8");
+    ensureDir(courseJsonFolder);
 
     const moduleFiles = [];
     for (let i = 0; i < entry.modulePages.length; i += 1) {
       const module = entry.modulePages[i];
-      if (!module.html) continue;
+      const fileBase = `${String(i + 1).padStart(2, "0")}-${safeFileName(module.title)}`;
       console.log(`[export]   module ${i + 1}/${entry.modulePages.length}: ${module.title.slice(0, 60)}`);
 
-      const moduleTranslator = createTranslator();
-      const translatedModuleHtml = await translateHtmlPreservingMarkup(module.html, moduleTranslator);
-      const fileBase = `${String(i + 1).padStart(2, "0")}-${safeFileName(module.title)}`;
-      const fileName = `${fileBase}.html`;
-      const moduleFile = path.join(courseFolder, fileName);
-      fs.writeFileSync(moduleFile, translatedModuleHtml, "utf8");
-      moduleFiles.push({ fileName, href: module.href, title: module.title, kind: "html" });
-
-      try {
-        const sourcePageObj = buildPageObjectFromHtml(module.html);
-        const translatedPageObj = moduleTranslator.canTranslate()
-          ? await translatePageObject(sourcePageObj, moduleTranslator)
-          : sourcePageObj;
-        const jsonFileName = `${fileBase}.json`;
-        writeModuleJson(path.join(courseFolder, jsonFileName), {
-          course: entry.course.title,
-          module: module.title,
-          sourceUrl: module.href,
-          targetLanguage: moduleTranslator.targetLanguage,
-          translatedAt: new Date().toISOString()
-        }, sourcePageObj, translatedPageObj);
-        moduleFiles.push({ fileName: jsonFileName, href: module.href, title: module.title, kind: "page-object-json" });
-      } catch (err) {
-        moduleFiles.push({ fileName: "", href: module.href, title: module.title, kind: "page-object-json-error", error: err.message });
+      // Resolve to the raw asset URL (handles viewer.html?file= wrappers too).
+      const assetUrl = extractSourceAssetUrl(module.href) || module.href;
+      const ext = detectAssetType(assetUrl);
+      if (!assetUrl || ext === "unknown") {
+        moduleFiles.push({
+          title: module.title,
+          sourceAssetUrl: module.href || "",
+          status: "no-asset-url"
+        });
+        continue;
       }
 
+      const cachedPath = path.join(coursePdfFolder, `${fileBase}.source.${ext}`);
+      let cacheResult;
       try {
-        const pptxName = `${fileBase}.translated.pptx`;
-        const pptxPath = path.join(courseFolder, pptxName);
-        const moduleKey = `${safeFileName(entry.course.courseCode || entry.course.title)}-${fileBase}`;
-        const cacheFileBasePath = path.join(coursePdfFolder, `${fileBase}.source`);
-        const pptxResult = await generateTranslatedPptFromPdf({
-          requestContext,
-          moduleHref: module.href,
-          moduleTitle: module.title,
-          moduleKey,
-          cacheFileBasePath,
-          outputPptxPath: pptxPath,
-          translator: moduleTranslator,
-          logger: (msg) => console.log(msg)
-        });
-
-        if (pptxResult.generated) {
-          const cacheName = path.basename(pptxResult.cacheFilePath || "");
-          if (cacheName) {
-            moduleFiles.push({
-              fileName: path.join("pdf", cacheName),
-              href: module.href,
-              title: module.title,
-              kind: "cached-source-pdf",
-              cacheHit: Boolean(pptxResult.cacheHit)
-            });
-          }
-          moduleFiles.push({
-            fileName: pptxName,
-            href: module.href,
-            title: module.title,
-            kind: "translated-pptx",
-            sourceAssetUrl: pptxResult.sourceAssetUrl,
-            pageCount: pptxResult.pageCount
-          });
-        } else {
-          if (pptxResult.cacheFilePath) {
-            moduleFiles.push({
-              fileName: path.join("pdf", path.basename(pptxResult.cacheFilePath)),
-              href: module.href,
-              title: module.title,
-              kind: "cached-source-asset",
-              cacheHit: Boolean(pptxResult.cacheHit),
-              assetType: pptxResult.assetType || "unknown"
-            });
-          }
-          moduleFiles.push({
-            fileName: "",
-            href: module.href,
-            title: module.title,
-            kind: "translated-pptx-skipped",
-            reason: pptxResult.reason || "unknown"
-          });
-        }
+        cacheResult = await cacheAsset(requestContext, assetUrl, cachedPath);
       } catch (err) {
+        console.warn(`[export]     download failed: ${err.message}`);
         moduleFiles.push({
-          fileName: "",
-          href: module.href,
           title: module.title,
-          kind: "translated-pptx-error",
+          sourceAssetUrl: assetUrl,
+          status: "download-failed",
           error: err.message
         });
+        continue;
       }
 
-      // Convert the cached source PDF into a compact per-page JSON for AI
-      // translation. Lives in a sibling json/ folder (separate from pdf/) and
-      // uses the compact schema by default to minimize prompt tokens.
-      try {
-        const cachedPdf = path.join(coursePdfFolder, `${fileBase}.source.pdf`);
-        if (fs.existsSync(cachedPdf)) {
-          const courseJsonFolder = path.join(courseFolder, "json");
+      const entryRecord = {
+        title: module.title,
+        sourceAssetUrl: assetUrl,
+        pdf: path.relative(courseFolder, cacheResult.filePath).split(path.sep).join("/"),
+        cacheHit: Boolean(cacheResult.cacheHit)
+      };
+
+      // Only PDFs convert to the compact per-page JSON.
+      if (ext === "pdf") {
+        try {
           const jsonOut = path.join(courseJsonFolder, `${fileBase}.json`);
-          const result = await writePdfJson(cachedPdf, jsonOut, {
+          const result = await writePdfJson(cachedPath, jsonOut, {
             course: entry.course.title,
             module: module.title
           }, { compact: true });
-          moduleFiles.push({
-            fileName: path.join("json", path.basename(jsonOut)),
-            href: module.href,
-            title: module.title,
-            kind: "source-pdf-pages-json",
-            pageCount: result.pageCount,
-            pageCountAfterClean: result.pageCountAfterClean,
-            lineCount: result.lineCount,
-            bytes: result.bytes
-          });
+          entryRecord.json = path.relative(courseFolder, jsonOut).split(path.sep).join("/");
+          entryRecord.pageCount = result.pageCount;
+          entryRecord.pageCountAfterClean = result.pageCountAfterClean;
+          entryRecord.lineCount = result.lineCount;
+          entryRecord.bytes = result.bytes;
+          entryRecord.status = "ok";
+        } catch (err) {
+          entryRecord.status = "json-failed";
+          entryRecord.error = err.message;
         }
-      } catch (err) {
-        moduleFiles.push({
-          fileName: "",
-          href: module.href,
-          title: module.title,
-          kind: "source-pdf-pages-json-error",
-          error: err.message
-        });
+      } else {
+        entryRecord.status = `cached-${ext}-no-json`;
       }
+
+      moduleFiles.push(entryRecord);
     }
 
     manifest.push({
       course: entry.course,
-      courseFile: path.relative(outputDir, courseFile),
       moduleFiles
     });
   }
@@ -307,5 +265,6 @@ module.exports = {
   pickCurrentTermForIrregular,
   scrapeModulesForCourses,
   exportTranslatedHtml,
-  createHttpClient
+  createHttpClient,
+  cleanCourseFolder
 };

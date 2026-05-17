@@ -58,10 +58,25 @@ async function runUseSaved(savedSummary) {
   let total = 0;
   let failed = 0;
   let totalBytes = 0;
+  let totalPruned = 0;
+
+  // Prune legacy files from EVERY course folder, including ones with zero PDFs
+  // (e.g., courses where the module has no source PDF). cleanCourseFolder is a
+  // no-op when nothing needs cleaning.
+  if (fs.existsSync(config.outputDir)) {
+    for (const name of fs.readdirSync(config.outputDir)) {
+      const courseDir = path.join(config.outputDir, name);
+      if (!fs.statSync(courseDir).isDirectory()) continue;
+      totalPruned += headlessAdapter.cleanCourseFolder(courseDir);
+    }
+  }
+
+  const manifest = [];
   for (const course of savedSummary) {
     const courseFolder = path.dirname(course.pdfDir);
     const jsonFolder = path.join(courseFolder, "json");
     console.log(`\n[saved] === ${course.courseName} (${course.pdfs.length} PDF(s)) -> json/ ===`);
+    const moduleFiles = [];
     for (const pdfPath of course.pdfs) {
       // Strip the trailing ".source" if present so the JSON filename is clean.
       let base = path.basename(pdfPath, path.extname(pdfPath));
@@ -76,13 +91,35 @@ async function runUseSaved(savedSummary) {
         console.log(`[saved]   OK   ${path.basename(jsonOut).padEnd(60)} ${r.pageCountAfterClean}p / ${r.lineCount}lines / ${kb}KB`);
         total += 1;
         totalBytes += r.bytes;
+        moduleFiles.push({
+          title: base,
+          pdf: path.relative(courseFolder, pdfPath).split(path.sep).join("/"),
+          json: path.relative(courseFolder, jsonOut).split(path.sep).join("/"),
+          pageCount: r.pageCount,
+          pageCountAfterClean: r.pageCountAfterClean,
+          lineCount: r.lineCount,
+          bytes: r.bytes,
+          status: "ok"
+        });
       } catch (err) {
         console.warn(`[saved]   FAIL ${path.basename(pdfPath)}: ${err.message}`);
         failed += 1;
+        moduleFiles.push({
+          title: base,
+          pdf: path.relative(courseFolder, pdfPath).split(path.sep).join("/"),
+          status: "json-failed",
+          error: err.message
+        });
       }
     }
+    manifest.push({ course: { title: course.courseName }, moduleFiles });
   }
-  console.log(`\n[saved] Done. ${total} JSON file(s) written (${(totalBytes / 1024).toFixed(1)} KB total), ${failed} failure(s).`);
+
+  const manifestPath = path.join(config.outputDir, "manifest.json");
+  fs.writeFileSync(manifestPath, JSON.stringify(manifest, null, 2), "utf8");
+
+  console.log(`\n[saved] Done. ${total} JSON file(s) written (${(totalBytes / 1024).toFixed(1)} KB total), ${failed} failure(s), ${totalPruned} legacy file(s) pruned.`);
+  console.log(`[saved] Manifest refreshed: ${manifestPath}`);
 }
 
 async function chooseCoursesForScrape(courses) {
