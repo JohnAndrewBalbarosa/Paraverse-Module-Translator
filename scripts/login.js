@@ -36,6 +36,29 @@ function loud(msg) {
   stderr.write(`\n[login] *** ${msg} ***\n\n`);
 }
 
+function bigNumberBanner(number) {
+  const bar = "=".repeat(60);
+  const padded = `   TAP THIS NUMBER IN MICROSOFT AUTHENTICATOR:  ${number}   `;
+  stderr.write(`\n${bar}\n${padded}\n${bar}\n\n`);
+}
+
+async function readMfaNumber(page) {
+  const selectors = [
+    "#idRichContext_DisplaySign",
+    ".displaySign",
+    "#displaySign",
+    "[data-bind*='DisplaySign']",
+    "div[role='heading'] + div b",
+    "#idDiv_SAOTCAS_Description + div"
+  ];
+  for (const sel of selectors) {
+    const txt = await safeText(page.locator(sel));
+    const m = txt && txt.match(/\b(\d{2,3})\b/);
+    if (m) return m[1];
+  }
+  return "";
+}
+
 async function promptUsername() {
   if (process.env.PARAVERSE_USERNAME) {
     log(`Using PARAVERSE_USERNAME from .env (${process.env.PARAVERSE_USERNAME}).`);
@@ -163,23 +186,27 @@ async function waitForMfaOrSuccess(page) {
   const start = Date.now();
   let lastNumber = "";
   let warnedNoNumber = false;
+  let lastHeader = "";
 
   while (Date.now() - start < MFA_WAIT_MS) {
     if (await isOnParaverse(page)) return "success";
 
     const headerText = (await safeText(page.locator("#loginHeader"))) || "";
+    if (headerText && headerText !== lastHeader) {
+      log(`MS page: "${headerText}"`);
+      lastHeader = headerText;
+    }
+
     if (/incorrect|wrong password|denied|verify your identity/i.test(headerText)) {
       const detail =
         (await safeText(page.locator("#passwordError, #usernameError, .alert-error"))) || headerText;
       throw new Error(`Sign-in rejected: ${detail || headerText}`);
     }
 
-    const num =
-      (await safeText(page.locator("#idRichContext_DisplaySign"))) ||
-      (await safeText(page.locator(".displaySign")));
+    const num = await readMfaNumber(page);
     if (num && num !== lastNumber) {
       lastNumber = num;
-      loud(`Tap ${num} in your Microsoft Authenticator app`);
+      bigNumberBanner(num);
     } else if (!num && !warnedNoNumber && /approve/i.test(headerText)) {
       warnedNoNumber = true;
       loud("Approve the sign-in request in your Microsoft Authenticator app.");
@@ -190,7 +217,7 @@ async function waitForMfaOrSuccess(page) {
       await page.click("#idSIButton9").catch(() => {});
     }
 
-    await page.waitForTimeout(2000);
+    await page.waitForTimeout(1000);
   }
   throw new Error(`MFA timeout (${MFA_WAIT_MS / 1000}s). Re-run: npm run login`);
 }
