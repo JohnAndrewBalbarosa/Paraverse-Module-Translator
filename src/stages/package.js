@@ -21,6 +21,7 @@ function relativeFromCourse(courseFolder, full) {
 }
 
 function pickModulesForManifest(context) {
+  if (context.renderedModules && context.renderedModules.length) return context.renderedModules;
   if (context.translatedModules && context.translatedModules.length) return context.translatedModules;
   if (context.extractedModules && context.extractedModules.length) return context.extractedModules;
   if (context.downloadedModules && context.downloadedModules.length) return context.downloadedModules;
@@ -43,6 +44,9 @@ function buildManifest(context) {
       if (m.cachedPath) record.pdf = relativeFromCourse(entry.courseFolder, m.cachedPath);
       if (m.jsonPath) record.json = relativeFromCourse(entry.courseFolder, m.jsonPath);
       if (m.translatedPath) record.translated = relativeFromCourse(entry.courseFolder, m.translatedPath);
+      if (m.pptxPath) record.pptx = relativeFromCourse(entry.courseFolder, m.pptxPath);
+      if (m.pdfTranslatedPath) record.pdfTranslated = relativeFromCourse(entry.courseFolder, m.pdfTranslatedPath);
+      if (m.renderStatus) record.renderStatus = m.renderStatus;
       if (typeof m.pageCount === "number") record.pageCount = m.pageCount;
       if (typeof m.pageCountAfterClean === "number") record.pageCountAfterClean = m.pageCountAfterClean;
       if (typeof m.lineCount === "number") record.lineCount = m.lineCount;

@@ -28,9 +28,10 @@ function parseArgs(argv) {
     loginOnly: argv.includes("--login-only"),
     useSaved: argv.includes("--use-saved"),
     fresh: argv.includes("--fresh"),
-    translate: argv.includes("--translate") || argv.includes("--translate-verify"),
+    translate: argv.includes("--translate") || argv.includes("--translate-verify") || argv.includes("--render"),
     translateVerify: argv.includes("--translate-verify"),
-    autoAll: argv.includes("--auto-all") || argv.includes("--translate-verify"),
+    render: argv.includes("--render"),
+    autoAll: argv.includes("--auto-all") || argv.includes("--translate-verify") || argv.includes("--render"),
     translator: pickOpt(argv, "--translator"),
     targetLang: pickOpt(argv, "--target-lang")
   };
@@ -56,7 +57,11 @@ function findSavedCourses(outputDir) {
     if (!fs.existsSync(pdfDir)) continue;
     const pdfs = fs
       .readdirSync(pdfDir)
-      .filter((f) => /\.(pdf|pptx?)$/i.test(f))
+      // Only treat ORIGINAL downloaded assets as sources. The render stage
+      // also writes `*.tl.pdf` (translated outputs) into this same folder;
+      // those must NOT be re-fed as inputs to the extract stage or they'd
+      // overwrite the translated JSONs.
+      .filter((f) => /\.source\.(pdf|pptx?)$/i.test(f))
       .map((f) => path.join(pdfDir, f))
       .sort();
     if (pdfs.length === 0) continue;
