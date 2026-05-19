@@ -58,7 +58,8 @@ async function run(context, deps) {
           pdfTranslatedPath: pdfOut,
           renderStatus: "pdf-ready",
           overlays: result.overlays,
-          overlaySkipped: result.skipped
+          overlaySkipped: result.skipped,
+          overlayFit: result.fit || null
         });
       } catch (err) {
         log(`[render]   ${i + 1}/${entry.modules.length} FAILED ${base}: ${err.message}`);

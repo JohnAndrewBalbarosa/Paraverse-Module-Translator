@@ -38,6 +38,15 @@ const PURE_NOISE = /^[\s\d\W]{0,3}$/;
 const SENTENCE_END = /[.!?…:](["'”’])?\s*$/;
 const BULLET_OR_NUMBER_START = /^[\s]*([•·●▪■◆\-*]|\d+[.)\s]|[A-Z][.)\s]|\([a-z0-9]+\))/;
 
+// --- Fit-planner tunables ---
+const MIN_FONT_SIZE = 6;            // never shrink below this
+const LINE_HEIGHT_RATIO = 1.15;     // line-spacing relative to fontSize
+const ASCENT_RATIO = 0.8;           // baseline offset from top of line box
+const PAGE_SAFE_MARGINS = { top: 18, right: 18, bottom: 18, left: 18 };
+const COVER_PADDING = 0.5;          // small extra padding around cover box
+const SHRINK_STEP = 0.5;            // font-size step when shrinking
+const FIT_EPSILON = 1.0;            // measurement slack to absorb rounding
+
 function isNoiseLine(text) {
   if (!text) return true;
   const t = String(text).trim();
@@ -294,6 +303,246 @@ function sanitizeForWinAnsi(s) {
 }
 
 /**
+ * Greedy word-wrap. Pack words until next word would exceed maxWidth.
+ * If a single word is wider than maxWidth on its own, emit it as its own
+ * line (mild overflow accepted; letter-splitting reads worse).
+ *
+ * @param {string} text
+ * @param {object} font - pdf-lib font (must support widthOfTextAtSize)
+ * @param {number} fontSize
+ * @param {number} maxWidth
+ * @returns {string[]}
+ */
+function wrapTextIntoLines(text, font, fontSize, maxWidth) {
+  if (!text) return [];
+  const words = String(text).split(/\s+/).filter(Boolean);
+  if (!words.length) return [];
+  const lines = [];
+  let current = "";
+  for (const word of words) {
+    const candidate = current ? `${current} ${word}` : word;
+    let w;
+    try {
+      w = font.widthOfTextAtSize(candidate, fontSize);
+    } catch {
+      // If measurement fails on a char (shouldn't after sanitize), force break.
+      w = Number.POSITIVE_INFINITY;
+    }
+    if (w <= maxWidth + FIT_EPSILON) {
+      current = candidate;
+    } else {
+      if (current) lines.push(current);
+      current = word; // start a new line with the over-wide word
+    }
+  }
+  if (current) lines.push(current);
+  return lines;
+}
+
+/**
+ * Decide how to render one translated line over the source bbox.
+ *
+ * Tries: keep original fontSize (no wrap) -> wrap at original fontSize ->
+ *        shrink fontSize stepwise -> truncate -> give up.
+ *
+ * Returns a plan describing exactly what to draw and where.
+ *
+ * @param {object} params
+ * @param {string} params.text - already sanitized translated string
+ * @param {Array<{x,y,width,height,baselineY,fontSize}>} params.sourceBoxes
+ * @param {object} params.font - pdf-lib font
+ * @param {number} params.initialFontSize
+ * @param {number} params.pageWidth
+ * @param {number} params.pageHeight
+ * @param {number|null} params.nextLineTopY - Y of next source line's TOP, or null
+ * @param {{top:number,right:number,bottom:number,left:number}} params.pageMargins
+ * @returns {{
+ *   decision: "fit-original" | "wrap-fit" | "fit-shrunk" | "truncated" | "no-room",
+ *   fontSize: number,
+ *   lineHeight: number,
+ *   wrappedLines: string[],
+ *   drawAt: { x: number, baselineY: number },
+ *   coverRect: { x: number, y: number, width: number, height: number },
+ *   diagnostics: object
+ * }}
+ */
+function planLineFit(params) {
+  const {
+    text,
+    sourceBoxes,
+    font,
+    initialFontSize,
+    pageWidth,
+    pageHeight,
+    nextLineTopY,
+    pageMargins
+  } = params;
+
+  const firstBox = sourceBoxes[0];
+  const union = unionBoxes(sourceBoxes);
+
+  const availableLeft = Math.max(pageMargins.left, firstBox.x);
+  const availableRight = pageWidth - pageMargins.right;
+  const availableTop = union.y + union.height;
+  const availableBottom = Math.max(
+    pageMargins.bottom,
+    nextLineTopY != null ? nextLineTopY + 2 : pageMargins.bottom
+  );
+  const availableWidth = Math.max(1, availableRight - availableLeft);
+  const availableHeight = Math.max(0, availableTop - availableBottom);
+
+  const srcChars = sourceBoxes
+    .reduce((s, b) => s + (b.text ? b.text.length : 0), 0); // best-effort; may be 0 if not tracked
+  const trnChars = String(text || "").length;
+  const ratio = srcChars > 0 ? trnChars / srcChars : null;
+
+  const attempts = [];
+  const buildCoverRect = (wrappedLines, fontSize) => {
+    const lineHeight = fontSize * LINE_HEIGHT_RATIO;
+    const requiredHeight = wrappedLines.length * lineHeight;
+    // Cover the rendered area (which can extend BELOW the source bbox)
+    let maxLineWidth = 0;
+    for (const ln of wrappedLines) {
+      try {
+        const w = font.widthOfTextAtSize(ln, fontSize);
+        if (w > maxLineWidth) maxLineWidth = w;
+      } catch {
+        /* ignore */
+      }
+    }
+    const coverWidth = Math.max(union.width, maxLineWidth) + COVER_PADDING * 2;
+    return {
+      x: availableLeft - COVER_PADDING,
+      y: availableTop - requiredHeight - COVER_PADDING,
+      width: coverWidth,
+      height: requiredHeight + COVER_PADDING * 2
+    };
+  };
+  const buildDrawAt = (fontSize) => ({
+    x: availableLeft,
+    baselineY: availableTop - fontSize * ASCENT_RATIO
+  });
+
+  // 1. Try original fontSize, single line first (best fidelity)
+  try {
+    const singleLineWidth = font.widthOfTextAtSize(text, initialFontSize);
+    if (singleLineWidth <= availableWidth + FIT_EPSILON) {
+      const wrappedLines = [text];
+      const lineHeight = initialFontSize * LINE_HEIGHT_RATIO;
+      if (lineHeight <= availableHeight + FIT_EPSILON) {
+        return {
+          decision: "fit-original",
+          fontSize: initialFontSize,
+          lineHeight,
+          wrappedLines,
+          drawAt: buildDrawAt(initialFontSize),
+          coverRect: buildCoverRect(wrappedLines, initialFontSize),
+          diagnostics: {
+            srcChars, trnChars, ratio,
+            srcWidth: union.width,
+            trnSingleLineWidth: singleLineWidth,
+            attemptedFontSizes: [initialFontSize],
+            finalLines: 1
+          }
+        };
+      }
+    }
+  } catch {
+    /* fall through to wrap/shrink */
+  }
+
+  // 2. Try wrap at original fontSize, then progressively shrink
+  for (
+    let fontSize = initialFontSize;
+    fontSize >= MIN_FONT_SIZE;
+    fontSize -= SHRINK_STEP
+  ) {
+    const wrappedLines = wrapTextIntoLines(text, font, fontSize, availableWidth);
+    if (!wrappedLines.length) break;
+    attempts.push(fontSize);
+    const lineHeight = fontSize * LINE_HEIGHT_RATIO;
+    const requiredHeight = wrappedLines.length * lineHeight;
+    if (requiredHeight <= availableHeight + FIT_EPSILON) {
+      let decision;
+      if (fontSize === initialFontSize) {
+        decision = wrappedLines.length === 1 ? "fit-original" : "wrap-fit";
+      } else {
+        decision = "fit-shrunk";
+      }
+      return {
+        decision,
+        fontSize,
+        lineHeight,
+        wrappedLines,
+        drawAt: buildDrawAt(fontSize),
+        coverRect: buildCoverRect(wrappedLines, fontSize),
+        diagnostics: {
+          srcChars, trnChars, ratio,
+          srcWidth: union.width,
+          attemptedFontSizes: attempts.slice(),
+          finalLines: wrappedLines.length
+        }
+      };
+    }
+  }
+
+  // 3. Couldn't fit at MIN_FONT_SIZE — truncate
+  const wrappedAtMin = wrapTextIntoLines(text, font, MIN_FONT_SIZE, availableWidth);
+  const minLineHeight = MIN_FONT_SIZE * LINE_HEIGHT_RATIO;
+  const maxLines = Math.floor(availableHeight / minLineHeight);
+  if (maxLines >= 1 && wrappedAtMin.length > 0) {
+    const truncatedLines = wrappedAtMin.slice(0, maxLines);
+    const lastIdx = truncatedLines.length - 1;
+    // Append ellipsis (sanitized form) to the last visible line
+    let lastLine = truncatedLines[lastIdx];
+    const ellipsis = "...";
+    while (
+      lastLine.length > 0 &&
+      font.widthOfTextAtSize(`${lastLine}${ellipsis}`, MIN_FONT_SIZE) > availableWidth + FIT_EPSILON
+    ) {
+      lastLine = lastLine.slice(0, -1);
+    }
+    truncatedLines[lastIdx] = `${lastLine}${ellipsis}`;
+    return {
+      decision: "truncated",
+      fontSize: MIN_FONT_SIZE,
+      lineHeight: minLineHeight,
+      wrappedLines: truncatedLines,
+      drawAt: buildDrawAt(MIN_FONT_SIZE),
+      coverRect: buildCoverRect(truncatedLines, MIN_FONT_SIZE),
+      diagnostics: {
+        srcChars, trnChars, ratio,
+        srcWidth: union.width,
+        attemptedFontSizes: attempts.slice(),
+        finalLines: truncatedLines.length,
+        truncatedFrom: wrappedAtMin.length
+      }
+    };
+  }
+
+  // 4. No room at all — return a no-op draw plan; caller will still cover source
+  return {
+    decision: "no-room",
+    fontSize: MIN_FONT_SIZE,
+    lineHeight: minLineHeight,
+    wrappedLines: [],
+    drawAt: buildDrawAt(MIN_FONT_SIZE),
+    coverRect: {
+      x: union.x - COVER_PADDING,
+      y: union.y - COVER_PADDING,
+      width: union.width + COVER_PADDING * 2,
+      height: union.height + COVER_PADDING * 2
+    },
+    diagnostics: {
+      srcChars, trnChars, ratio,
+      srcWidth: union.width,
+      attemptedFontSizes: attempts.slice(),
+      finalLines: 0
+    }
+  };
+}
+
+/**
  * Main entry: overlay translation onto source PDF.
  *
  * @param {string} sourcePdfPath
@@ -322,6 +571,7 @@ async function overlayTranslation(sourcePdfPath, translatedJson, outputPdfPath, 
   const pages = pdfDoc.getPages();
   let totalOverlays = 0;
   let totalSkipped = 0;
+  const fit = { fitOriginal: 0, wrapFit: 0, fitShrunk: 0, truncated: 0, noRoom: 0 };
 
   for (const srcPage of cleanedSourcePages) {
     const pdfPage = pages[srcPage.pageNumber - 1];
@@ -332,7 +582,10 @@ async function overlayTranslation(sourcePdfPath, translatedJson, outputPdfPath, 
       continue;
     }
 
-    // Pair by index: source cleaned line N ↔ translated line N
+    const pageWidth = pdfPage.getWidth();
+    const pageHeight = pdfPage.getHeight();
+
+    // Pair by index: source cleaned line N ↔ translated line N.
     const pairs = Math.min(srcPage.lines.length, trnPage.lines.length);
     for (let i = 0; i < pairs; i += 1) {
       const srcLine = srcPage.lines[i];
@@ -340,64 +593,108 @@ async function overlayTranslation(sourcePdfPath, translatedJson, outputPdfPath, 
       const trnText = sanitizeForWinAnsi(pickTextForLine(trnLine));
       if (!trnText) continue;
 
-      // White-box all source boxes for this line (covers original text)
+      const isHeading = trnLine.h !== undefined;
+      const font = isHeading ? helvBold : helv;
+      const initialFontSize = srcLine.fontSize || 12;
+
+      // Look ahead at the NEXT source line's top to determine the vertical
+      // floor we can use without colliding with the line below us.
+      const nextSrcLine = srcPage.lines[i + 1];
+      const nextLineTopY = nextSrcLine
+        ? unionBoxes(nextSrcLine.sourceBoxes).y + unionBoxes(nextSrcLine.sourceBoxes).height
+        : null;
+
+      const plan = planLineFit({
+        text: trnText,
+        sourceBoxes: srcLine.sourceBoxes,
+        font,
+        initialFontSize,
+        pageWidth,
+        pageHeight,
+        nextLineTopY,
+        pageMargins: PAGE_SAFE_MARGINS
+      });
+
+      // 1. Always cover the source bbox (so original text is hidden) AND
+      //    extend down if the plan's wrapped content is taller than the
+      //    source. Two-rect strategy: cover the original boxes precisely,
+      //    plus add an extra rect for the overflow region if any.
       for (const box of srcLine.sourceBoxes) {
         pdfPage.drawRectangle({
-          x: box.x - 0.5,
-          y: box.y - 0.5,
-          width: box.width + 1,
-          height: box.height + 1,
+          x: box.x - COVER_PADDING,
+          y: box.y - COVER_PADDING,
+          width: box.width + COVER_PADDING * 2,
+          height: box.height + COVER_PADDING * 2,
+          color: rgb(1, 1, 1),
+          borderWidth: 0
+        });
+      }
+      // Extra cover for content drawn below the source bbox (wrap overflow)
+      const srcUnion = unionBoxes(srcLine.sourceBoxes);
+      const planBottom = plan.coverRect.y;
+      const srcBottom = srcUnion.y;
+      if (planBottom < srcBottom - 0.5) {
+        pdfPage.drawRectangle({
+          x: plan.coverRect.x,
+          y: plan.coverRect.y,
+          width: plan.coverRect.width,
+          height: srcBottom - plan.coverRect.y,
           color: rgb(1, 1, 1),
           borderWidth: 0
         });
       }
 
-      // Draw translated text at the first source box's position
-      const firstBox = srcLine.sourceBoxes[0];
-      const union = unionBoxes(srcLine.sourceBoxes);
-      let fontSize = srcLine.fontSize || 12;
-      const isHeading = trnLine.h !== undefined;
-      const font = isHeading ? helvBold : helv;
-
-      // Shrink-to-fit if translated text is wider than the source box width
-      const measure = (s, fs) => font.widthOfTextAtSize(s, fs);
-      const maxW = union.width || (firstBox.width);
-      let textW = measure(trnText, fontSize);
-      // If single-line width exceeds maxW, allow wrap by reducing font size up to 70%
-      while (textW > maxW * 1.05 && fontSize > 7) {
-        fontSize -= 0.5;
-        textW = measure(trnText, fontSize);
+      // 2. Draw each wrapped line at its own baseline.
+      let drewAny = false;
+      try {
+        for (let k = 0; k < plan.wrappedLines.length; k += 1) {
+          const lineText = plan.wrappedLines[k];
+          const baselineY = plan.drawAt.baselineY - k * plan.lineHeight;
+          pdfPage.drawText(lineText, {
+            x: plan.drawAt.x,
+            y: baselineY,
+            size: plan.fontSize,
+            font,
+            color: rgb(0, 0, 0)
+          });
+          drewAny = true;
+        }
+        if (drewAny) totalOverlays += 1;
+        else totalSkipped += 1;
+      } catch {
+        // pdf-lib threw on an unsupported character that slipped past the
+        // sanitizer. Skip the text draw (cover already applied above).
+        totalSkipped += 1;
       }
 
-      // Determine baseline Y. firstBox is the top-most original line (highest Y).
-      // The original text's baseline was at the top of the bbox minus ascent.
-      const baselineY = firstBox.y + (firstBox.height * 0.2); // approx baseline
-
-      try {
-        pdfPage.drawText(trnText, {
-          x: firstBox.x,
-          y: baselineY,
-          size: fontSize,
-          font,
-          color: rgb(0, 0, 0),
-          maxWidth: maxW,
-          lineHeight: fontSize * 1.15
-        });
-        totalOverlays += 1;
-      } catch (err) {
-        // pdf-lib throws on unsupported characters (e.g., Tagalog ñ in some
-        // fonts). Skip silently — original text remains, no overlay.
-        totalSkipped += 1;
+      // 3. Tally by decision.
+      switch (plan.decision) {
+        case "fit-original": fit.fitOriginal += 1; break;
+        case "wrap-fit":     fit.wrapFit += 1; break;
+        case "fit-shrunk":   fit.fitShrunk += 1; break;
+        case "truncated":    fit.truncated += 1; break;
+        case "no-room":      fit.noRoom += 1; break;
+        default: break;
       }
     }
   }
 
-  log(`[pdfOverlay] ${path.basename(outputPdfPath)} — ${totalOverlays} overlays, ${totalSkipped} skipped`);
+  log(
+    `[pdfOverlay] ${path.basename(outputPdfPath)} — ` +
+    `${totalOverlays} overlays, ${totalSkipped} skipped ` +
+    `(${fit.fitOriginal} fit / ${fit.wrapFit} wrap / ${fit.fitShrunk} shrunk / ` +
+    `${fit.truncated} trunc / ${fit.noRoom} no-room)`
+  );
 
   const out = await pdfDoc.save();
   fs.mkdirSync(path.dirname(outputPdfPath), { recursive: true });
   fs.writeFileSync(outputPdfPath, out);
-  return { path: outputPdfPath, overlays: totalOverlays, skipped: totalSkipped };
+  return {
+    path: outputPdfPath,
+    overlays: totalOverlays,
+    skipped: totalSkipped,
+    fit
+  };
 }
 
 module.exports = {

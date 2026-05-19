@@ -1,116 +1,79 @@
-# Where we stopped — 2026-05-17
+# Where we stopped — 2026-05-18
 
-## Refactor: DONE (Step 1-7 of plan)
+## Auto-fit overlay refactor: SHIPPED
 
-- `src/translators/` with `gemini`, `manual`, `identity` backends — built & tested
-- `src/stages/` with 7 stages (`discover`, `selectCourses`, `scrape`, `download`, `extract`, `translate`, `package`) — extracted from old monolith
-- `src/pipeline.js` — composer ready
-- `src/index.js` — thin CLI wrapper, new flags `--translate`, `--translator=`, `--target-lang=`
-- `docs/architecture.md` + `docs/translators.md` — written for future devs
-- Pipeline verified end-to-end with `npm start -- --use-saved --translate --translator=manual --target-lang=tl`
+`src/pdfOverlay.js` now has a proper fit planner:
 
-## Translations done: 51 / 60
+- **New `planLineFit()`** decides per line: keep size / wrap / shrink / truncate
+- **New `wrapTextIntoLines()`** does measured greedy word-wrap (no more silent overflow from `pdf-lib`'s internal wrap)
+- **Available rectangle** computed against page bounds + next-line Y → no off-page rendering, no collision with content below
+- **Cover rectangle** now extends to match the rendered (possibly wrapped) area, not just the source bbox → no original text peeking through
+- **Diagnostics** tallied per file and per module:
+  `94 fit / 168 wrap / 68 shrunk / 0 trunc / 2 no-room` style summary
 
-Done (51 `.tl.json` files):
-- CS_CS0033: 4/4 (Gemini did these earlier)
-- HSC_GED0061: 7/8 (missing #8 APPLIED_ETHICS — largest at 61KB)
-- HSC_GED0073: 9/10 (missing #4 ON_INFORMAL_ARGUMENTS)
-- HSC_GED0085: 9/10 (missing #4 The_Social_and_Anthropological_Construction_of_Gender)
-- ITE_CCS0047: 6/6 ✓
-- IT_CS0029: 9/10 (missing #1 Security_Fundamentals)
-- IT_CS0061: 7/12 (missing #3 SD, #4 MM, #5 PP, #8 HCM, #9 WM)
+## Status of translated PDFs
 
-## Pending: 9 files
+**60/60 `.tl.pdf` files exist on disk** — but ~30 were regenerated with the new fit-aware logic before stop, the other ~30 are still the OLD overlay output (from previous run). To finish regenerating everything, just re-run.
 
-```
-output/HSC_GED0061/json/08-APPLIED_ETHICS.json                                       (61 KB, largest)
-output/HSC_GED0073/json/04-ON_INFORMAL_ARGUMENTS.json                                 (26 KB)
-output/HSC_GED0085/json/04-The_Social_and_Anthropological_Construction_of_Gender.json (26 KB)
-output/IT_CS0029/json/01-Security_Fundamentals.json                                   (24 KB)
-output/IT_CS0061/json/03-Sales_and_Distribution_SD.json                               (34 KB)
-output/IT_CS0061/json/04-Materials_Management_MM.json                                 (36 KB)
-output/IT_CS0061/json/05-Production_Planning_and_Execution_PP.json                    (36 KB)
-output/IT_CS0061/json/08-Human_Capital_Management_HCM.json                            (31 KB)
-output/IT_CS0061/json/09-Warehouse_Management_WM.json                                 (26 KB)
-```
+Modules already refreshed with new logic (per log):
+- HSC_GED0061: 02 (MAN_AS_THE_AGENT), 05 (CATEGORICAL_IMPERATIVE), 07 (DISTRIBUTIVE)
+- HSC_GED0073: 01-04, 07-10
+- HSC_GED0085: 02-06, 08-10
+- ITE_CCS0047: 01, 03, 04
 
-**Important:** 3 background translator subagents (batches 4, 5, 6) may still be running and producing files for most of the above. By the time you read this, the count may already be higher. Run this to check:
-
-```powershell
-find output -name "*.tl.json" | wc -l
-```
+Still on OLD overlay (need rerun):
+- CS_CS0033: 01-04
+- HSC_GED0061: 01, 03, 04, 06, 08
+- HSC_GED0085: 01, 07
+- ITE_CCS0047: 02, 05, 06
+- IT_CS0029: all 10
+- IT_CS0061: all 12
 
 ## How to resume
 
-### Option A: Wait for Gemini quota reset, then auto-translate
-
 ```powershell
-$env:TRANSLATOR='gemini'
-$env:RESEARCH_API_KEY='AIza...'
-$env:RESEARCH_MODEL='gemini-2.5-flash'
-npm start -- --use-saved --translate --target-lang=tl
+npm start -- --use-saved --render --target-lang=tl
 ```
 
-The `translate` stage skips files that already have a `.tl.json` sibling (idempotent), so Gemini will only translate the remaining 9 (or however many are pending).
+Idempotent — translate stage skips JSONs already on disk, render stage overwrites `.tl.pdf` cleanly with the new planner. Expect ~3-5 min for 60 modules. Each module logs a fit summary line.
 
-### Option B: Continue manual translation (Claude as AI)
-
-In a new session, paste this prompt to Claude:
-
-> Translate the remaining `.json` files under `output/<course>/json/` (those without a `.tl.json` sibling) into Taglish. For each source file:
-> 1. Read it
-> 2. Translate every `h` and `p` string value, keeping the structure 100% identical
-> 3. Style: Taglish (English technical terms + Tagalog connectors), keep copyright/URL/equation/citation verbatim
-> 4. Add to meta: `targetLang: "tl"`, `translator: "claude-manual"`, `translatedAt: <iso>`
-> 5. Write to `<base>.tl.json` next to the source
->
-> Use multiple parallel general-purpose subagents to handle batches if there are many files.
-
-### Option C: Identity passthrough (just exit cleanly)
-
-If you don't need translations right now and just want the pipeline to mark everything as "done":
+After rerun, run the diagnostic scan to find modules with `truncated > 0` or `noRoom > 5`:
 
 ```powershell
-$env:TRANSLATOR='identity'
-npm start -- --use-saved --translate --target-lang=tl
+node -e "const m = require('./output/manifest.json'); for (const c of m) for (const f of c.moduleFiles) if (f.overlayFit && (f.overlayFit.truncated > 0 || f.overlayFit.noRoom > 5)) console.log(c.course.title, '/', f.title, '->', JSON.stringify(f.overlayFit))"
 ```
 
-The `identity` backend reports `status: "skipped"` for each file — pipeline finishes cleanly, manifest still gets updated.
+## Files changed in this session
 
-## Verify translations match structure
+- `src/pdfOverlay.js` — added constants block, `planLineFit()`, `wrapTextIntoLines()`; refactored inner overlay loop; new `fit` field in return shape
+- `src/stages/render.js` — propagates `overlayFit` from overlay result
+- `src/stages/package.js` — adds `overlayFit` to manifest record
 
-Once everything is translated, run a quick parity check:
+No other files touched.
 
-```powershell
-node -e "
-const fs = require('fs'); const path = require('path');
-let ok = 0, fail = 0;
-for (const dir of fs.readdirSync('output')) {
-  const jd = path.join('output', dir, 'json');
-  if (!fs.existsSync(jd)) continue;
-  for (const f of fs.readdirSync(jd)) {
-    if (!f.endsWith('.json') || f.endsWith('.tl.json')) continue;
-    const tl = path.join(jd, f.replace('.json', '.tl.json'));
-    if (!fs.existsSync(tl)) { console.log('MISSING', f); fail++; continue; }
-    const src = JSON.parse(fs.readFileSync(path.join(jd, f), 'utf8'));
-    const trn = JSON.parse(fs.readFileSync(tl, 'utf8'));
-    if (src.pages.length !== trn.pages.length) { console.log('PAGES MISMATCH', f); fail++; continue; }
-    let mismatch = false;
-    for (let i = 0; i < src.pages.length; i++) {
-      if (src.pages[i].lines.length !== trn.pages[i].lines.length) { mismatch = true; break; }
-    }
-    if (mismatch) { console.log('LINES MISMATCH', f); fail++; continue; }
-    ok++;
-  }
-}
-console.log('OK:', ok, 'FAIL:', fail);
-"
+## Fit-planner observed behavior (good signs)
+
+From the partial run, the planner is making sensible decisions:
+- `94 fit / 168 wrap / 68 shrunk / 0 trunc / 2 no-room` for a dense ethics module
+- Across modules: 0 truncations needed (translations always fit at min font size)
+- `no-room` counts are low (1-9 per module, usually 1-2) — these are extreme cases where translation is much longer than source bbox AND there's no space below
+
+## Tunables (in `src/pdfOverlay.js` top of file)
+
+```js
+const MIN_FONT_SIZE = 6;            // never shrink below
+const LINE_HEIGHT_RATIO = 1.15;     // line-spacing
+const ASCENT_RATIO = 0.8;           // baseline offset
+const PAGE_SAFE_MARGINS = { top: 18, right: 18, bottom: 18, left: 18 };
+const COVER_PADDING = 0.5;
+const SHRINK_STEP = 0.5;
+const FIT_EPSILON = 1.0;
 ```
 
-## Files / docs to read first when resuming
+If layout still feels too tight after rerun, lower `MIN_FONT_SIZE` to 5 or increase `LINE_HEIGHT_RATIO` to 1.2.
 
-- `docs/architecture.md` — pipeline + stages explained
-- `docs/translators.md` — backend interface
-- `src/pipeline.js` — STAGES list (current order)
-- `src/stages/translate.js` — how files get queued for manual backend
-- `src/translators/manual.js` — what "manual" mode looks for on disk
+## Out of scope (next time, if needed)
+
+- Embedding a Unicode TTF font (would let us render `•` `❑` `→` etc. without ASCII substitution)
+- Sampling underlying color before drawing the white cover (so dark slide headers don't show white blocks)
+- Per-word position mapping (current approach is per-line — adequate for slides, less so for paragraph-heavy PDFs)

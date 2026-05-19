@@ -47,6 +47,7 @@ function buildManifest(context) {
       if (m.pptxPath) record.pptx = relativeFromCourse(entry.courseFolder, m.pptxPath);
       if (m.pdfTranslatedPath) record.pdfTranslated = relativeFromCourse(entry.courseFolder, m.pdfTranslatedPath);
       if (m.renderStatus) record.renderStatus = m.renderStatus;
+      if (m.overlayFit) record.overlayFit = m.overlayFit;
       if (typeof m.pageCount === "number") record.pageCount = m.pageCount;
       if (typeof m.pageCountAfterClean === "number") record.pageCountAfterClean = m.pageCountAfterClean;
       if (typeof m.lineCount === "number") record.lineCount = m.lineCount;
