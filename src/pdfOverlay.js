@@ -378,11 +378,13 @@ function planLineFit(params) {
     pageMargins
   } = params;
 
-  const firstBox = sourceBoxes[0];
   const union = unionBoxes(sourceBoxes);
 
-  const availableLeft = Math.max(pageMargins.left, firstBox.x);
-  const availableRight = pageWidth - pageMargins.right;
+  // Per-line source-box width awareness: constrain horizontal room to the
+  // ORIGINAL line's bbox, not the full page width. This prevents translated
+  // text from spilling into adjacent columns, sidebars, or images.
+  const availableLeft = union.x;
+  const availableRight = union.x + union.width;
   const availableTop = union.y + union.height;
   const availableBottom = Math.max(
     pageMargins.bottom,
@@ -423,32 +425,59 @@ function planLineFit(params) {
     baselineY: availableTop - fontSize * ASCENT_RATIO
   });
 
-  // 1. Try original fontSize, single line first (best fidelity)
+  // 1. Single-line pure-calculation fit.
+  //
+  //    pdf-lib's widthOfTextAtSize is linear in fontSize for standard fonts,
+  //    so we can compute the EXACT font size at which `text` fits exactly into
+  //    `availableWidth` on one line:
+  //        textWidth(text, fontSize) = unitWidth * fontSize
+  //        fitFontSize = availableWidth / unitWidth
+  //
+  //    This replaces the old "try original, else fall through to shrink loop"
+  //    polling — same accuracy, one calculation, no iteration.
   try {
-    const singleLineWidth = font.widthOfTextAtSize(text, initialFontSize);
-    if (singleLineWidth <= availableWidth + FIT_EPSILON) {
-      const wrappedLines = [text];
-      const lineHeight = initialFontSize * LINE_HEIGHT_RATIO;
-      if (lineHeight <= availableHeight + FIT_EPSILON) {
-        return {
-          decision: "fit-original",
-          fontSize: initialFontSize,
-          lineHeight,
-          wrappedLines,
-          drawAt: buildDrawAt(initialFontSize),
-          coverRect: buildCoverRect(wrappedLines, initialFontSize),
-          diagnostics: {
-            srcChars, trnChars, ratio,
-            srcWidth: union.width,
-            trnSingleLineWidth: singleLineWidth,
-            attemptedFontSizes: [initialFontSize],
-            finalLines: 1
+    const unitWidth = font.widthOfTextAtSize(text, 1);
+    if (unitWidth > 0) {
+      let fitFontSize = Math.min(
+        initialFontSize,
+        (availableWidth + FIT_EPSILON) / unitWidth
+      );
+      // Quantize down to SHRINK_STEP so decisions tally consistently with the
+      // wrap-loop path (which steps by SHRINK_STEP).
+      fitFontSize = Math.floor(fitFontSize / SHRINK_STEP) * SHRINK_STEP;
+
+      if (fitFontSize >= MIN_FONT_SIZE) {
+        const lineHeight = fitFontSize * LINE_HEIGHT_RATIO;
+        if (lineHeight <= availableHeight + FIT_EPSILON) {
+          const singleLineWidth = font.widthOfTextAtSize(text, fitFontSize);
+          // Guard against rounding overshoot; should be rare after quantize.
+          if (singleLineWidth <= availableWidth + FIT_EPSILON) {
+            const wrappedLines = [text];
+            const decision = fitFontSize >= initialFontSize - 1e-6
+              ? "fit-original"
+              : "fit-shrunk";
+            return {
+              decision,
+              fontSize: fitFontSize,
+              lineHeight,
+              wrappedLines,
+              drawAt: buildDrawAt(fitFontSize),
+              coverRect: buildCoverRect(wrappedLines, fitFontSize),
+              diagnostics: {
+                srcChars, trnChars, ratio,
+                srcWidth: union.width,
+                trnSingleLineWidth: singleLineWidth,
+                attemptedFontSizes: [fitFontSize],
+                finalLines: 1,
+                viaPureCalc: true
+              }
+            };
           }
-        };
+        }
       }
     }
   } catch {
-    /* fall through to wrap/shrink */
+    /* fall through to wrap/shrink loop */
   }
 
   // 2. Try wrap at original fontSize, then progressively shrink
