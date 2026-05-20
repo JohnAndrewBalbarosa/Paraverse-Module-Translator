@@ -6,7 +6,9 @@
  *     to the source PDF (same images, charts, layout) — only the text is
  *     replaced. Done by `src/pdfOverlay.js` which loads the source PDF and
  *     white-boxes + redraws each text line.
- *   - Output goes to `output/<course>/pdf/<base>.tl.pdf`, next to the source.
+ *   - Output goes to `output/<course>/pdf-translated/<base>.tl.pdf`, in a
+ *     SEPARATE folder from the source PDFs so listings stay clean and the
+ *     `findSavedCourses` filter never has to disambiguate inputs from outputs.
  *
  * Reads from context:  translatedModules
  * Writes to context:   renderedModules[] = [{ course, modules[] with pdfTranslatedPath, status }]
@@ -31,7 +33,7 @@ async function run(context, deps) {
 
   for (const entry of context.translatedModules) {
     log(`[render] === ${entry.course.title} ===`);
-    const pdfFolder = path.join(entry.courseFolder, "pdf");
+    const pdfFolder = path.join(entry.courseFolder, "pdf-translated");
     ensureDir(pdfFolder);
 
     const out = [];
