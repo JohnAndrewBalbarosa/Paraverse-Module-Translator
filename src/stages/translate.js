@@ -116,7 +116,11 @@ async function run(context, deps) {
       // Short-circuit if the translated sibling exists AND is still aligned
       // with the current source extraction. A mismatched cache (different
       // schema or different per-page line count) causes silent overlay
-      // misalignment, so we delete it and retranslate.
+      // misalignment. We do NOT delete the stale file upfront — if the
+      // retranslation later fails (Gemini outage, rate limit), we'd rather
+      // keep a misaligned-but-existing translation than have nothing at all.
+      // The successful write below overwrites it atomically.
+      let staleCacheFallback = null;
       if (fs.existsSync(expectedPath)) {
         const check = validateCachedTranslation(m.jsonPath, expectedPath);
         if (check.valid) {
@@ -129,12 +133,8 @@ async function run(context, deps) {
           log(`[translate]   ${i + 1}/${entry.modules.length} (cached) ${path.basename(expectedPath)}`);
           continue;
         }
+        staleCacheFallback = { path: expectedPath, reason: check.reason };
         log(`[translate]   ${i + 1}/${entry.modules.length} (stale, retranslating: ${check.reason}) ${path.basename(expectedPath)}`);
-        try {
-          fs.unlinkSync(expectedPath);
-        } catch (err) {
-          log(`[translate]   warning: could not delete stale cache: ${err.message}`);
-        }
       }
 
       let sourceJson;
@@ -182,13 +182,25 @@ async function run(context, deps) {
           translateReason: result.reason || "translator chose to skip"
         });
       } else {
-        out.push({
-          ...m,
-          translatedPath: "",
-          translateStatus: "failed",
-          translateReason: result.reason || "unknown failure"
-        });
-        log(`[translate]   ${i + 1}/${entry.modules.length} FAILED ${m.fileBase}: ${result.reason}`);
+        // Retranslation failed. If we had a stale cache, keep using it as a
+        // best-effort fallback so render still has something to overlay.
+        if (staleCacheFallback) {
+          out.push({
+            ...m,
+            translatedPath: staleCacheFallback.path,
+            translateStatus: "translated",
+            translateReason: `retranslate failed (${result.reason}); using stale cache (${staleCacheFallback.reason})`
+          });
+          log(`[translate]   ${i + 1}/${entry.modules.length} FALLBACK ${m.fileBase}: retranslate failed, keeping stale cache (${result.reason})`);
+        } else {
+          out.push({
+            ...m,
+            translatedPath: "",
+            translateStatus: "failed",
+            translateReason: result.reason || "unknown failure"
+          });
+          log(`[translate]   ${i + 1}/${entry.modules.length} FAILED ${m.fileBase}: ${result.reason}`);
+        }
       }
     }
     translatedModules.push({
