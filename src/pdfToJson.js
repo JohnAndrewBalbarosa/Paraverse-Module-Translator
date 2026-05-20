@@ -1,22 +1,29 @@
 const fs = require("fs");
 const path = require("path");
 const pdfjsLib = require("pdfjs-dist/legacy/build/pdf.js");
+const { getPageContainers, assignItemToContainer } = require("./containerDetect");
 
 /**
  * Convert a PDF into a per-page, line-by-line JSON structure suitable for
  * sending to an LLM for translation. The LLM is expected to replace each
  * element's `text` field with the translation and return the same shape.
  *
- * Output schema:
+ * Output schema (compact-v2):
  * {
- *   meta: { sourceFile, course, module, generatedAt, pageCount },
+ *   meta: { sourceFile, course, module, generatedAt, pageCount, schema: "compact-v2" },
  *   pages: [
- *     { page: 1, elements: [
- *       { type: "heading", text: "..." },
- *       { type: "paragraph", text: "..." }
+ *     { n: 1, lines: [
+ *       { h: "..." }              // heading, on bare page
+ *       { p: "...", c: 3 }        // paragraph, inside container id 3
  *     ] }
  *   ]
  * }
+ *
+ * Container awareness:
+ *   Each line carries an optional `c` field = container id. Lines from
+ *   different containers are NEVER merged during reflow even if their Y
+ *   coordinates are close. This is what keeps the footer copyright line
+ *   from being glued onto the bullet text above it.
  */
 
 const LINE_Y_TOLERANCE = 3; // PDF points — items within this Y delta are same line
@@ -35,9 +42,26 @@ function median(values) {
   return sorted.length % 2 === 0 ? (sorted[mid - 1] + sorted[mid]) / 2 : sorted[mid];
 }
 
-function groupItemsIntoLines(items) {
+/**
+ * Build a per-item "approximate bbox" used for container-membership tests.
+ * Items report a baseline (x, y) + width; we extend slightly above/below the
+ * baseline by fontSize fractions so the bbox covers ascenders/descenders.
+ */
+function itemBBox(it) {
+  const w = typeof it.width === "number" ? it.width : it.text.length * it.fontSize * 0.5;
+  return {
+    x: it.x,
+    y: it.y - it.fontSize * 0.25,
+    width: w,
+    height: it.fontSize * 1.1
+  };
+}
+
+function groupItemsIntoLines(items, containers) {
   // Items have { str, transform: [a,b,c,d,x,y], width, height, fontName }
-  // Y in PDF coords increases upward. Group by Y proximity.
+  // Y in PDF coords increases upward. Group by Y proximity, then split each
+  // bucket by container id so items from different visual boxes never end up
+  // in the same logical line.
   const buckets = [];
   for (const item of items) {
     if (!item || !item.str) continue;
@@ -48,20 +72,46 @@ function groupItemsIntoLines(items) {
     const fontSize = Math.abs(item.transform?.[0] ?? item.height ?? 12);
     const fontName = item.fontName || "";
     const width = typeof item.width === "number" ? item.width : null;
+    const enriched = { text, x, y, fontSize, fontName, width };
+    const containerId = containers && containers.length
+      ? assignItemToContainer(itemBBox(enriched), containers)
+      : null;
+    enriched.containerId = containerId;
     const existing = buckets.find((b) => Math.abs(b.y - y) <= LINE_Y_TOLERANCE);
     if (existing) {
-      existing.items.push({ text, x, fontSize, fontName, width });
+      existing.items.push(enriched);
       existing.y = (existing.y + y) / 2; // running average
     } else {
-      buckets.push({ y, items: [{ text, x, fontSize, fontName, width }] });
+      buckets.push({ y, items: [enriched] });
     }
   }
-  // Sort buckets top-to-bottom (high Y → low Y in PDF coords)
-  buckets.sort((a, b) => b.y - a.y);
-  return buckets.map((b) => {
-    b.items.sort((a, b2) => a.x - b2.x);
-    return b;
+  // Split each Y-bucket into per-container sub-buckets.
+  const split = [];
+  for (const b of buckets) {
+    const groups = new Map();
+    for (const it of b.items) {
+      const key = it.containerId == null ? "null" : String(it.containerId);
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key).push(it);
+    }
+    for (const [key, groupItems] of groups.entries()) {
+      groupItems.sort((a, b2) => a.x - b2.x);
+      split.push({
+        y: b.y,
+        items: groupItems,
+        containerId: key === "null" ? null : Number(key)
+      });
+    }
+  }
+  // Sort top-to-bottom (high Y first). For ties, sort by container id so a
+  // stable reading order emerges (null containers first, then id 1, 2, ...).
+  split.sort((a, b) => {
+    if (Math.abs(b.y - a.y) > 0.001) return b.y - a.y;
+    const ca = a.containerId == null ? -1 : a.containerId;
+    const cb = b.containerId == null ? -1 : b.containerId;
+    return ca - cb;
   });
+  return split;
 }
 
 function joinItemsInLine(items) {
@@ -76,9 +126,6 @@ function joinItemsInLine(items) {
       const gap = it.x - (prev.x + prevWidth);
       const endsWithSpace = /\s$/.test(out);
       const startsWithSpace = /^\s/.test(it.text);
-      // Require gap larger than ~half a typical space char to insert a space.
-      // PDFs often emit adjacent glyphs (e.g., "M" + "orality") with tiny
-      // positive gaps from kerning; we must NOT split those.
       if (!endsWithSpace && !startsWithSpace && gap > prev.fontSize * 0.45) {
         out += " ";
       }
@@ -106,7 +153,12 @@ function classifyLine(line, baselineFontSize) {
       type = "heading";
     }
   }
-  return { type, text, fontSize: Math.round(lineFontSize * 10) / 10 };
+  return {
+    type,
+    text,
+    fontSize: Math.round(lineFontSize * 10) / 10,
+    containerId: line.containerId == null ? null : line.containerId
+  };
 }
 
 async function extractPagesAsJson(pdfBuffer) {
@@ -120,9 +172,6 @@ async function extractPagesAsJson(pdfBuffer) {
   } else {
     data = new Uint8Array(pdfBuffer);
   }
-  // verbosity 0 = ERRORS only. Suppresses noisy "fetchStandardFontData" warnings
-  // that pdfjs prints when running in Node without bundled font assets — they
-  // don't affect text extraction.
   const loadingTask = pdfjsLib.getDocument({
     data,
     disableWorker: true,
@@ -131,6 +180,7 @@ async function extractPagesAsJson(pdfBuffer) {
   });
   const doc = await loadingTask.promise;
   const pages = [];
+  const containerStats = { perPage: [], totalContainers: 0, splitsPrevented: 0 };
 
   // First pass: collect all line font sizes across the document to compute
   // a stable baseline that won't be skewed by a single oversized cover page.
@@ -140,7 +190,23 @@ async function extractPagesAsJson(pdfBuffer) {
   for (let p = 1; p <= doc.numPages; p += 1) {
     const page = await doc.getPage(p);
     const content = await page.getTextContent();
-    const lines = groupItemsIntoLines(content.items);
+    const containers = await getPageContainers(page);
+    containerStats.perPage.push(containers.length);
+    containerStats.totalContainers += containers.length;
+
+    // Track how many Y-buckets got split by container awareness — useful
+    // signal in the checker report.
+    const preSplitBuckets = new Set();
+    for (const item of content.items) {
+      if (!item || !item.str || !item.str.trim()) continue;
+      const y = item.transform?.[5] ?? 0;
+      // crude bucket key, same tolerance
+      preSplitBuckets.add(Math.round(y / LINE_Y_TOLERANCE));
+    }
+    const lines = groupItemsIntoLines(content.items, containers);
+    if (lines.length > preSplitBuckets.size) {
+      containerStats.splitsPrevented += lines.length - preSplitBuckets.size;
+    }
     perPageRawLines.push(lines);
     for (const line of lines) {
       const fs = Math.max(...line.items.map((i) => i.fontSize), 0);
@@ -156,13 +222,17 @@ async function extractPagesAsJson(pdfBuffer) {
     for (const line of lines) {
       const classified = classifyLine(line, baseline);
       if (classified && classified.text) {
-        elements.push({ type: classified.type, text: classified.text });
+        elements.push({
+          type: classified.type,
+          text: classified.text,
+          containerId: classified.containerId
+        });
       }
     }
     pages.push({ page: p, elements });
   }
 
-  return { pageCount: doc.numPages, pages };
+  return { pageCount: doc.numPages, pages, containerStats };
 }
 
 // ---------- Cleanup pass: token reduction for LLM prompts ----------
@@ -184,7 +254,9 @@ function isNoiseLine(text) {
 function reflowParagraphs(elements) {
   // Merge wrapped paragraph lines: if line A ends without a sentence-ending
   // mark and line B does not start with a new bullet/number/heading, B is a
-  // continuation of A.
+  // continuation of A — but ONLY when both live in the same container. We
+  // never merge across container boundaries even if Y + punctuation would
+  // otherwise allow it.
   const merged = [];
   for (const el of elements) {
     const prev = merged[merged.length - 1];
@@ -192,6 +264,7 @@ function reflowParagraphs(elements) {
       prev &&
       prev.type === "paragraph" &&
       el.type === "paragraph" &&
+      prev.containerId === el.containerId &&
       !SENTENCE_END.test(prev.text) &&
       !BULLET_OR_NUMBER_START.test(el.text)
     ) {
@@ -218,12 +291,15 @@ function cleanPages(rawPages) {
 
 function toCompactForm(pages) {
   // Serialize each element as { h } for heading or { p } for paragraph.
-  // Saves ~20-25 bytes per element vs the verbose { type, text } form.
+  // Add { c: <containerId> } when the line belongs to a container so the
+  // overlay step can constrain text to that visual region.
   return pages.map((page) => ({
     n: page.page,
-    lines: page.elements.map((el) =>
-      el.type === "heading" ? { h: el.text } : { p: el.text }
-    )
+    lines: page.elements.map((el) => {
+      const base = el.type === "heading" ? { h: el.text } : { p: el.text };
+      if (el.containerId != null) base.c = el.containerId;
+      return base;
+    })
   }));
 }
 
@@ -235,7 +311,7 @@ function countLines(pages) {
 
 async function convertPdfFileToJson(pdfPath, meta = {}, opts = {}) {
   const buf = fs.readFileSync(pdfPath);
-  const { pageCount, pages } = await extractPagesAsJson(buf);
+  const { pageCount, pages, containerStats } = await extractPagesAsJson(buf);
 
   const wantCleanCompact = opts.compact !== false; // default true
   const finalPages = wantCleanCompact ? cleanPages(pages) : pages;
@@ -251,11 +327,12 @@ async function convertPdfFileToJson(pdfPath, meta = {}, opts = {}) {
       lineCount: wantCleanCompact
         ? serialized.reduce((s, p) => s + p.lines.length, 0)
         : countLines(finalPages),
-      schema: wantCleanCompact ? "compact-v1" : "verbose-v1",
+      schema: wantCleanCompact ? "compact-v2" : "verbose-v2",
       schemaHint: wantCleanCompact
-        ? "pages[].lines[] is an array of { h: heading-text } or { p: paragraph-text }. Translate by replacing the string values; keep keys and order identical."
-        : "pages[].elements[] has { type, text }. Translate the text field.",
-      generatedAt: new Date().toISOString()
+        ? "pages[].lines[] is an array of { h: heading-text } or { p: paragraph-text }, optionally with { c: containerId } pointing at the visual box this line lives inside. Translate by replacing string values only; keep keys, order, and `c` field identical."
+        : "pages[].elements[] has { type, text, containerId }. Translate the text field.",
+      generatedAt: new Date().toISOString(),
+      containerStats
     },
     pages: serialized
   };
@@ -272,7 +349,8 @@ async function writePdfJson(pdfPath, jsonOutPath, meta = {}, opts = {}) {
     pageCount: data.meta.pageCount,
     pageCountAfterClean: data.meta.pageCountAfterClean,
     lineCount: data.meta.lineCount,
-    bytes: fs.statSync(jsonOutPath).size
+    bytes: fs.statSync(jsonOutPath).size,
+    containerStats: data.meta.containerStats
   };
 }
 

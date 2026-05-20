@@ -22,6 +22,7 @@ const scrape = require("./stages/scrape");
 const download = require("./stages/download");
 const extract = require("./stages/extract");
 const translate = require("./stages/translate");
+const checker = require("./stages/checker");
 const render = require("./stages/render");
 const pkg = require("./stages/package");
 
@@ -32,6 +33,7 @@ const STAGES = [
   download,
   extract,
   translate,
+  checker,
   render,
   pkg
 ];

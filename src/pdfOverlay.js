@@ -32,6 +32,7 @@ const path = require("path");
 const pdfjsLib = require("pdfjs-dist/legacy/build/pdf.js");
 const { PDFDocument, StandardFonts, rgb } = require("pdf-lib");
 const fontkit = require("@pdf-lib/fontkit");
+const { getPageContainers, assignItemToContainer, buildContainerIndex } = require("./containerDetect");
 
 const LINE_Y_TOLERANCE = 3;
 const PURE_NOISE = /^[\s\d\W]{0,3}$/;
@@ -61,7 +62,19 @@ function isBoldFont(fontName) {
   return /bold|black|heavy|semibold|extrabold/i.test(fontName || "");
 }
 
-// Extract per-page raw items + group into lines with bboxes
+function itemApproxBBox(it) {
+  const w = it.width != null ? it.width : it.text.length * it.fontSize * 0.5;
+  return {
+    x: it.x,
+    y: it.y - it.fontSize * 0.25,
+    width: w,
+    height: it.fontSize * 1.1
+  };
+}
+
+// Extract per-page raw items + group into lines with bboxes.
+// MUST use the same Y-bucket → container-split pipeline as src/pdfToJson.js
+// so the source-line indices match what was sent to the translator.
 async function extractPagesWithBoxes(pdfBuffer) {
   let data;
   if (Buffer.isBuffer(pdfBuffer)) {
@@ -80,6 +93,9 @@ async function extractPagesWithBoxes(pdfBuffer) {
     const page = await doc.getPage(p);
     const viewport = page.getViewport({ scale: 1.0 });
     const content = await page.getTextContent();
+    const containers = await getPageContainers(page);
+    const containerIndex = buildContainerIndex(containers);
+
     const buckets = [];
     for (const item of content.items) {
       if (!item || !item.str) continue;
@@ -90,22 +106,54 @@ async function extractPagesWithBoxes(pdfBuffer) {
       const y = item.transform?.[5] ?? 0;
       const width = typeof item.width === "number" ? item.width : text.length * fontSize * 0.5;
       const fontName = item.fontName || "";
+      const enriched = { text, x, y, fontSize, fontName, width };
+      enriched.containerId = containers.length
+        ? assignItemToContainer(itemApproxBBox(enriched), containers)
+        : null;
       const existing = buckets.find((b) => Math.abs(b.y - y) <= LINE_Y_TOLERANCE);
       if (existing) {
-        existing.items.push({ text, x, y, fontSize, fontName, width });
+        existing.items.push(enriched);
         existing.y = (existing.y + y) / 2;
       } else {
-        buckets.push({ y, items: [{ text, x, y, fontSize, fontName, width }] });
+        buckets.push({ y, items: [enriched] });
       }
     }
-    // Sort top-to-bottom by PDF Y (high Y = top of page in PDF coords)
-    buckets.sort((a, b) => b.y - a.y);
+    // Split each Y-bucket by container id (same logic as pdfToJson.js).
+    const split = [];
     for (const b of buckets) {
-      b.items.sort((a, c) => a.x - c.x);
+      const groups = new Map();
+      for (const it of b.items) {
+        const key = it.containerId == null ? "null" : String(it.containerId);
+        if (!groups.has(key)) groups.set(key, []);
+        groups.get(key).push(it);
+      }
+      for (const [key, groupItems] of groups.entries()) {
+        groupItems.sort((a, c) => a.x - c.x);
+        split.push({
+          y: b.y,
+          items: groupItems,
+          containerId: key === "null" ? null : Number(key)
+        });
+      }
+    }
+    split.sort((a, b) => {
+      if (Math.abs(b.y - a.y) > 0.001) return b.y - a.y;
+      const ca = a.containerId == null ? -1 : a.containerId;
+      const cb = b.containerId == null ? -1 : b.containerId;
+      return ca - cb;
+    });
+    for (const b of split) {
       const fs = Math.max(...b.items.map((i) => i.fontSize), 0);
       if (fs > 0) allFontSizes.push(fs);
     }
-    pages.push({ pageNumber: p, pageWidth: viewport.width, pageHeight: viewport.height, buckets });
+    pages.push({
+      pageNumber: p,
+      pageWidth: viewport.width,
+      pageHeight: viewport.height,
+      buckets: split,
+      containers,
+      containerIndex
+    });
   }
   return { pageCount: doc.numPages, pages, allFontSizes };
 }
@@ -196,11 +244,12 @@ function buildCleanedPagesWithBoxes(rawPages, allFontSizes) {
         type: classified.type,
         text: classified.text,
         sourceBoxes: [lineBBox(b.items)],
-        fontSize: classified.fontSize
+        fontSize: classified.fontSize,
+        containerId: b.containerId == null ? null : b.containerId
       });
     }
-    // Second pass: reflow consecutive `p` lines that don't end with sentence
-    // terminator and don't start with bullet/number.
+    // Second pass: reflow consecutive `p` lines IF they share the same
+    // container. We never merge lines that visually live in different boxes.
     const merged = [];
     for (const el of candidates) {
       const prev = merged[merged.length - 1];
@@ -208,6 +257,7 @@ function buildCleanedPagesWithBoxes(rawPages, allFontSizes) {
         prev &&
         prev.type === "p" &&
         el.type === "p" &&
+        prev.containerId === el.containerId &&
         !SENTENCE_END.test(prev.text) &&
         !BULLET_OR_NUMBER_START.test(el.text)
       ) {
@@ -222,7 +272,9 @@ function buildCleanedPagesWithBoxes(rawPages, allFontSizes) {
         pageNumber: pg.pageNumber,
         pageWidth: pg.pageWidth,
         pageHeight: pg.pageHeight,
-        lines: merged
+        lines: merged,
+        containers: pg.containers || [],
+        containerIndex: pg.containerIndex || new Map()
       });
     }
   }
@@ -375,21 +427,48 @@ function planLineFit(params) {
     pageWidth,
     pageHeight,
     nextLineTopY,
-    pageMargins
+    pageMargins,
+    containerBBox // optional — when present, clamps drawing inside this box
   } = params;
 
   const union = unionBoxes(sourceBoxes);
 
   // Per-line source-box width awareness: constrain horizontal room to the
-  // ORIGINAL line's bbox, not the full page width. This prevents translated
-  // text from spilling into adjacent columns, sidebars, or images.
-  const availableLeft = union.x;
-  const availableRight = union.x + union.width;
-  const availableTop = union.y + union.height;
-  const availableBottom = Math.max(
+  // ORIGINAL line's bbox. When the line belongs to a visual container (e.g.,
+  // a callout, sidebar, or diagram node), we ALSO clamp to the container's
+  // bbox so wrapped/shrunk text never spills out of its visual home.
+  let availableLeft = union.x;
+  let availableRight = union.x + union.width;
+  let availableTop = union.y + union.height;
+  let availableBottom = Math.max(
     pageMargins.bottom,
     nextLineTopY != null ? nextLineTopY + 2 : pageMargins.bottom
   );
+  if (containerBBox) {
+    // Only clamp on sides where the source line is already INSIDE the
+    // container. If the source bbox already exceeds the container (font
+    // metrics, decorative overhang, mis-detected container), clamping that
+    // side would shrink available room and force unnecessary no-room cases.
+    // We tighten freely when the source is well within the container, which
+    // is the case that actually matters (preventing translated text from
+    // overflowing into adjacent boxes).
+    const cRight = containerBBox.x + containerBBox.width;
+    const cTop = containerBBox.y + containerBBox.height;
+    const srcRight = union.x + union.width;
+    const srcTop = union.y + union.height;
+    if (union.x >= containerBBox.x - 0.5 && availableLeft < containerBBox.x) {
+      availableLeft = containerBBox.x;
+    }
+    if (srcRight <= cRight + 0.5 && availableRight > cRight) {
+      availableRight = cRight;
+    }
+    if (srcTop <= cTop + 0.5 && availableTop > cTop) {
+      availableTop = cTop;
+    }
+    if (union.y >= containerBBox.y - 0.5 && availableBottom < containerBBox.y) {
+      availableBottom = containerBBox.y;
+    }
+  }
   const availableWidth = Math.max(1, availableRight - availableLeft);
   const availableHeight = Math.max(0, availableTop - availableBottom);
 
@@ -633,6 +712,9 @@ async function overlayTranslation(sourcePdfPath, translatedJson, outputPdfPath, 
         ? unionBoxes(nextSrcLine.sourceBoxes).y + unionBoxes(nextSrcLine.sourceBoxes).height
         : null;
 
+      const containerBBox = srcLine.containerId != null && srcPage.containerIndex
+        ? srcPage.containerIndex.get(srcLine.containerId) || null
+        : null;
       const plan = planLineFit({
         text: trnText,
         sourceBoxes: srcLine.sourceBoxes,
@@ -641,7 +723,8 @@ async function overlayTranslation(sourcePdfPath, translatedJson, outputPdfPath, 
         pageWidth,
         pageHeight,
         nextLineTopY,
-        pageMargins: PAGE_SAFE_MARGINS
+        pageMargins: PAGE_SAFE_MARGINS,
+        containerBBox
       });
 
       // 1. Always cover the source bbox (so original text is hidden) AND
