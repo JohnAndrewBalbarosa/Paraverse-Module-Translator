@@ -32,6 +32,55 @@ function loadSourceJson(jsonPath) {
   return parsed;
 }
 
+/**
+ * Decide whether a cached translation is still aligned with the current source
+ * extraction. Translation cache becomes stale when the source schema changes
+ * (e.g., compact-v1 → compact-v2 added container-aware splitting) or when the
+ * line counts diverge for any reason — the overlay step pairs by index, so any
+ * drift produces wrong placement.
+ *
+ * Returns { valid: true } when the cache can be reused, or
+ * { valid: false, reason } when it must be regenerated.
+ */
+function validateCachedTranslation(sourcePath, cachedPath) {
+  let source;
+  let cached;
+  try {
+    source = JSON.parse(fs.readFileSync(sourcePath, "utf8"));
+  } catch (err) {
+    return { valid: false, reason: `source unreadable: ${err.message}` };
+  }
+  try {
+    cached = JSON.parse(fs.readFileSync(cachedPath, "utf8"));
+  } catch (err) {
+    return { valid: false, reason: `cached unreadable: ${err.message}` };
+  }
+  const srcSchema = source.meta && source.meta.schema;
+  const cacheSchema = cached.meta && cached.meta.schema;
+  if (srcSchema && cacheSchema && srcSchema !== cacheSchema) {
+    return { valid: false, reason: `schema ${cacheSchema} != ${srcSchema}` };
+  }
+  const srcPages = Array.isArray(source.pages) ? source.pages : [];
+  const cachePages = Array.isArray(cached.pages) ? cached.pages : [];
+  if (srcPages.length !== cachePages.length) {
+    return {
+      valid: false,
+      reason: `page count ${cachePages.length} != ${srcPages.length}`
+    };
+  }
+  for (let i = 0; i < srcPages.length; i += 1) {
+    const sl = Array.isArray(srcPages[i].lines) ? srcPages[i].lines.length : 0;
+    const cl = Array.isArray(cachePages[i].lines) ? cachePages[i].lines.length : 0;
+    if (sl !== cl) {
+      return {
+        valid: false,
+        reason: `page ${srcPages[i].n || i + 1} lines ${cl} != ${sl}`
+      };
+    }
+  }
+  return { valid: true };
+}
+
 function buildTranslatedPath(sourcePath, targetLang) {
   const dir = path.dirname(sourcePath);
   const ext = path.extname(sourcePath);
@@ -64,17 +113,28 @@ async function run(context, deps) {
 
       const expectedPath = buildTranslatedPath(m.jsonPath, targetLang);
 
-      // Short-circuit if the translated sibling already exists. Lets re-runs
-      // be cheap and lets the manual workflow be resumable.
+      // Short-circuit if the translated sibling exists AND is still aligned
+      // with the current source extraction. A mismatched cache (different
+      // schema or different per-page line count) causes silent overlay
+      // misalignment, so we delete it and retranslate.
       if (fs.existsSync(expectedPath)) {
-        out.push({
-          ...m,
-          translatedPath: expectedPath,
-          translateStatus: "translated",
-          translateReason: "already on disk"
-        });
-        log(`[translate]   ${i + 1}/${entry.modules.length} (cached) ${path.basename(expectedPath)}`);
-        continue;
+        const check = validateCachedTranslation(m.jsonPath, expectedPath);
+        if (check.valid) {
+          out.push({
+            ...m,
+            translatedPath: expectedPath,
+            translateStatus: "translated",
+            translateReason: "already on disk"
+          });
+          log(`[translate]   ${i + 1}/${entry.modules.length} (cached) ${path.basename(expectedPath)}`);
+          continue;
+        }
+        log(`[translate]   ${i + 1}/${entry.modules.length} (stale, retranslating: ${check.reason}) ${path.basename(expectedPath)}`);
+        try {
+          fs.unlinkSync(expectedPath);
+        } catch (err) {
+          log(`[translate]   warning: could not delete stale cache: ${err.message}`);
+        }
       }
 
       let sourceJson;
